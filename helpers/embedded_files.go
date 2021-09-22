@@ -2,14 +2,17 @@ package helpers
 
 import (
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
 
+	// We need the imports for the side effects, i.e. the `init()`
+	// functions they run to register their filesystems. As none
+	// of the public symbols are directly used an non-blank import
+	// would be elided by go format.
+	_ "github.com/epinio/epinio/assets/statik"
 	"github.com/rakyll/statik/fs"
-	_ "github.com/suse/carrier/statik"
 )
 
 // ExtractFile creates a file in a temporary directory on disk from a file
@@ -48,7 +51,7 @@ func KubectlApplyEmbeddedYaml(yamlPath string) (string, error) {
 	}
 	defer os.Remove(yamlPathOnDisk)
 
-	return Kubectl(fmt.Sprintf("apply --filename %s", yamlPathOnDisk))
+	return Kubectl("apply", "--filename", yamlPathOnDisk)
 }
 
 // KubectlDeleteEmbeddedYaml un-embeds the given yaml file and calls `kubectl delete`
@@ -61,8 +64,10 @@ func KubectlDeleteEmbeddedYaml(yamlPath string, ignoreMissing bool) (string, err
 	defer os.Remove(yamlPathOnDisk)
 
 	if ignoreMissing {
-		return Kubectl(fmt.Sprintf("delete --ignore-not-found=true --wait=false --filename %s", yamlPathOnDisk))
-	} else {
-		return Kubectl(fmt.Sprintf("delete --filename %s", yamlPathOnDisk))
+		return Kubectl("delete",
+			"--ignore-not-found=true",
+			"--wait=false",
+			"--filename", yamlPathOnDisk)
 	}
+	return Kubectl("delete", "--filename", yamlPathOnDisk)
 }

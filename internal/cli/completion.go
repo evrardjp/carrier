@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -14,13 +15,13 @@ var CmdCompletion = &cobra.Command{
 
 Bash:
 
-$ source <(carrier completion bash)
+$ source <(epinio completion bash)
 
 # To load completions for each session, execute once:
 Linux:
-  $ carrier completion bash > /etc/bash_completion.d/carrier
+  $ epinio completion bash > /etc/bash_completion.d/epinio
 MacOS:
-  $ carrier completion bash > /usr/local/etc/bash_completion.d/carrier
+  $ epinio completion bash > /usr/local/etc/bash_completion.d/epinio
 
 ATTENTION:
     The generated script requires the bash-completion package.
@@ -35,38 +36,39 @@ Zsh:
 $ echo "autoload -U compinit; compinit" >> ~/.zshrc
 
 # To load completions for each session, execute once:
-$ carrier completion zsh > "${fpath[1]}/_carrier"
+$ epinio completion zsh > "${fpath[1]}/_epinio"
 
 # You will need to start a new shell for this setup to take effect.
 
 Fish:
 
-$ carrier completion fish | source
+$ epinio completion fish | source
 
 # To load completions for each session, execute once:
-$ carrier completion fish > ~/.config/fish/completions/carrier.fish
+$ epinio completion fish > ~/.config/fish/completions/epinio.fish
 
 Powershell:
 
-PS> carrier completion powershell | Out-String | Invoke-Expression
+PS> epinio completion powershell | Out-String | Invoke-Expression
 
 # To load completions for every new session, run:
-PS> carrier completion powershell > carrier.ps1
+PS> epinio completion powershell > epinio.ps1
 # and source this file from your powershell profile.
 `,
 	DisableFlagsInUseLine: true,
 	ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
 	Args:                  cobra.ExactValidArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		switch args[0] {
 		case "bash":
-			cmd.Root().GenBashCompletion(os.Stdout)
+			return cmd.Root().GenBashCompletion(os.Stdout)
 		case "zsh":
-			cmd.Root().GenZshCompletion(os.Stdout)
+			return cmd.Root().GenZshCompletion(os.Stdout)
 		case "fish":
-			cmd.Root().GenFishCompletion(os.Stdout, true)
+			return cmd.Root().GenFishCompletion(os.Stdout, true)
 		case "powershell":
-			cmd.Root().GenPowerShellCompletion(os.Stdout)
+			return cmd.Root().GenPowerShellCompletion(os.Stdout)
 		}
+		return errors.New("Internal error: Invalid shell")
 	},
 }

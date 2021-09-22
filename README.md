@@ -1,84 +1,172 @@
-# carrier
+# Epinio
 
 Opinionated platform that runs on Kubernetes, that takes you from App to URL in one step.
 
-![CI](https://github.com/SUSE/carrier/workflows/CI/badge.svg)
+[![godoc](https://pkg.go.dev/badge/epinio/epinio)](https://pkg.go.dev/github.com/epinio/epinio/internal/api/v1)
+[![CI](https://github.com/epinio/epinio/workflows/CI/badge.svg?event=schedule)](https://github.com/epinio/epinio/actions/workflows/main.yml?query=event%3Aschedule)
+[![AKS-CI](https://github.com/epinio/epinio/actions/workflows/aks.yml/badge.svg?event=schedule)](https://github.com/epinio/epinio/actions/workflows/aks.yml)
+[![EKS-CI](https://github.com/epinio/epinio/actions/workflows/eks.yml/badge.svg?event=schedule)](https://github.com/epinio/epinio/actions/workflows/eks.yml)
+[![golangci-lint](https://github.com/epinio/epinio/actions/workflows/golangci-lint.yml/badge.svg?event=schedule)](https://github.com/epinio/epinio/actions/workflows/golangci-lint.yml)
 
-<img src="./docs/carrier.svg" width="50%" height="50%">
+<img src="./docs/epinio.png" align="right" width="200" height="50%">
 
-## Principles
+## Contents
 
-- must fit in less than 4GB of RAM
-- must install in less than 5 minutes when images are warm
-- must install with a one-line command and zero config
-- must completely uninstall and leave the cluster in its previous state with a one-line command
-- must work on local clusters (edge friendly)
+- [Epinio](#epinio)
+  - [Contents](#contents)
+  - [What problem does Epinio solve](#what-problem-does-epinio-solve)
+  - [Features](#features)
+  - [Installation](#installation)
+    - [System Requirements](#system-requirements)
+      - [Kubernetes Cluster Requirements](#kubernetes-cluster-requirements)
+      - [Epinio CLI](#epinio-cli)
+    - [Install the Epinio CLI](#install-the-epinio-cli)
+    - [Installation Methods (in Cluster)](#installation-methods-in-cluster)
+    - [Installation on Specific Kubernetes Offerings](#installation-on-specific-kubernetes-offerings)
+  - [Usage](#usage)
+  - [Buildpacks](#buildpacks)
+  - [How the documentation is organized](#how-the-documentation-is-organized)
+  - [Reach Us](#reach-us)
+  - [Contributing](#contributing)
+  - [License](#license)
 
-### Guidelines
+## What problem does Epinio solve
 
-- if possible, choose components that are written in go
-- all acceptance tests should run in less than 10 minutes
-- all tests should be able to run on the minimal cluster 
+Epinio makes it easy for developers to deploy their applications to Kubernetes. Easy means:
+
+- No previous experience with Kubernetes is required
+- No steep learning curve
+- Quick local setup with zero configuration
+- Deploying to production similar to development
+
+Kubernetes is becoming the de-facto standard for container orchestration.
+Developers may want to use Kubernetes for all the benefits it provides or may
+have to do so because that's what their Ops team has chosen. Whatever the case,
+using Kubernetes is not simple. It has a steep learning curve and doing it right
+is a full time job. Developers should spend their time working on their applications,
+not doing operations.
+
+Epinio is adding the needed abstractions and intelligence to allow Developers
+to use Kubernetes as a PaaS (Platform as a Service).
+
+## Features
+
+- **Security**
+  - mTLS: Epinio uses `linkerd` to secure all communication between epinio components inside the kubernetes cluster
+  - Basic Authentication to access the API.
+- **Epinio Clients**
+  - Web UI
+  - Epinio CLI
+- **Apps**
+  - CRUD operations of your app. (An app can be a tarball or in a github repo)
+  - Cloud Native Buildpacks provide the runtime environment for your apps
+- **Services**
+  - CRUD operations of your service. A service can be a database, SaaS etc. A service can be an external component or can be created using `epinio service`
+  - Bind services to apps.
+
+## Installation
+
+### System Requirements
+
+#### Kubernetes Cluster Requirements
+
+For the Epinio server, and related deployments we recommend to consider the following resources:
+
+- 2-4 VCPUs
+- 8GB RAM (system memory + 4GB)
+- 10GB Disk space (system disk + 5GB)
+
+In addition, extensive requirements for your workload (apps) would add to that.
+
+A default storage class (with annotation `storageclass.kubernetes.io/is-default-class: "true"`) is needed.
+
+#### Epinio CLI
+
+The Epinio CLI will typically run on a host, which will need network access to your kubernetes cluster.
+Usually you will use the same host to run tooling, like e.g. "kubectl" and "helm".
+
+The compiled binary will use about 40-50MB disk space, incl. local configuration files.
+
+### Install the Epinio CLI
+
+Refer to [Install the Epinio CLI](./docs/user/tutorials/install_epinio_cli.md).
+
+### Installation Methods (in Cluster)
+
+Beside advanced installation options, there are two ways of installing Epinio:
+
+1. [Installation using a MagicDNS Service](./docs/user/tutorials/install_epinio_magicDNS.md)
+
+- For test environments. This should work on nearly any kubernetes distribution. Epinio will try to automatically create a magic DNS domain, e.g. **10.0.0.1.omg.howdoi.website**.
+
+2. [Installation using a Custom Domain](./docs/user/tutorials/install_epinio_customDNS.md)
+
+- For test and production environments. You will have to define a system domain, e.g. **test.example.com**.
+
+### Installation on Specific Kubernetes Offerings
+
+- [Install on K3d](./docs/user/tutorials/install_epinio_on_k3d.md) - Install K3d and then install Epinio
+- [Install on EKS](./docs/user/tutorials/install_epinio_on_eks.md) - Install Epinio in Amazon EKS clusters
+- [Install on AKS](./docs/user/tutorials/install_epinio_on_aks.md) - Install Epinio in Azure AKS clusters
+- [Install on GKE](./docs/user/tutorials/install_epinio_on_gke.md) - Install Epinio in Google GKE clusters
+- [Install on RKE2](./docs/user/tutorials/install_epinio_on_rke.md) - Install Epinio in Rancher RKE2 clusters
 
 ## Usage
-### Install
 
-```bash
-$ carrier install
-```
-### Uninstall
+- [QuickStart](./docs/user/tutorials/quickstart.md) - tutorial on how to create an org and push an application.
 
-```bash
-$ carrier uninstall
-```
+## Buildpacks
 
-### Push an application
+Buildpacks convert your application source code into container images in which the buildpack provides the framework, dependencies and runtime support for your app based on it's programming language.
 
-Run the following command for any supported application directory (e.g. inside [sample-app directory](sample-app)).
+Epinio uses [Paketo Buildpacks](https://paketo.io/docs/) through tekton pipelines to convert your source code into container images. 
 
-```bash
-$ carrier push NAME PATH_TO_APPLICATION_SOURCES
-```
+[Tekton Buildpack Pipeline](https://github.com/tektoncd/catalog/blob/main/task/buildpacks/0.3/buildpacks.yaml) - Epinio uses this tekton pipeline with the Paketo's full [Builder Image](https://paketo.io/docs/concepts/builders/).
 
-Note that the path argument is __optional__.
-If not specified the __current working directory__ will be used.
-Always ensure that the chosen directory contains a supported application.
+[Using Custom Buildpack](./docs/developer/howtos/custom-python-builder.md) - Steps to create and use a custom builder image that includes a buildpack for Python (The paketo  full [Builder Image](https://paketo.io/docs/concepts/builders/) doesn't support python apps yet).
 
-### Delete an application
+### Example apps
 
-```bash
-$ carrier delete NAME
-```
+- Rails: https://github.com/epinio/example-rails
+- Java: https://github.com/spring-projects/spring-petclinic/
+- Paketo Buildpack example apps: https://github.com/paketo-buildpacks/samples
 
-### Create a separate org
 
-```bash
-$ carrier create-org NAME
-```
+## How the documentation is organized
 
-### Target an org
+Epinio documentation is organised into these four quadrants in the `./docs/` folder.
 
-```bash
-$ carrier target NAME
-```
+[Tutorials](./docs/user/tutorials/) take you by the hand through a series of steps that are useful for a beginner like how to install epinio in various kubernetes distros, how to push an application and an org.
 
-### List all commands
+[How-to-guides](./docs/user/howtos/) explain steps to solve specific problems like how to create a redis database using epinio etc.
 
-```bash
-$ carrier help
-```
-### Detailed help for each command
+[Explanations](./docs/user/explanations/) discuss components of Epinio at a very high level like about linkerd, traefik etc.
 
-```bash
-$ carrier COMMAND --help
-```
+[References](./docs/user/references/) provides references about Epinio CLI docs and Epinio API docs.
 
-## Configuration
+## Reach Us
 
-Carrier places its configuration at `$HOME/.config/carrier/config.yaml` by default.
+- Slack: #epinio on [Rancher Users](https://rancher-users.slack.com/)
+- Github: [Discuss](https://github.com/epinio/epinio/discussions/new)
 
-For exceptional situations this can be overriden by either specifying
+## Contributing
 
-  - The global command-line option `--config-file`, or
+`Epinio` uses [Github Project](https://github.com/epinio/epinio/projects/1) for tracking issues. You can also find the issues currently being worked on in the `BackLog` section.
 
-  - The environment variable `CARRIER_CONFIG`.
+If you would like to start contributing to `Epinio`, then you can pick up any of the cards with label `good first issue`.
+
+## License
+
+Copyright (c) 2020-2021 [SUSE, LLC](http://suse.com)
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+[http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

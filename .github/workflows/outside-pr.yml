@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [ main ]
     types: [ labeled ]
+    paths-ignore:
+    - 'docs/**'
+    - 'README.md'
 
 jobs:
   build:
@@ -21,8 +24,6 @@ jobs:
           go-version: '^1.13.7'
       - name: Setup Ginkgo Test Framework
         run: go get -u github.com/onsi/ginkgo/ginkgo
-      - name: Lint Carrier
-        run: make lint
       - name: Cache Tools
         uses: actions/cache@v2
         with:
@@ -33,6 +34,8 @@ jobs:
       - name: Add Tools to PATH
         run: |
           echo "`pwd`/output/bin" >> $GITHUB_PATH
+      - name: lint Epinio
+        run: make lint
       - name: Run unit tests
         run: make test
       - name: Acceptance tests
@@ -40,4 +43,8 @@ jobs:
           REGISTRY_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          GINKGO_NODES=6 make test-acceptance
+          export GINKGO_NODES=8
+          make acceptance-cluster-delete
+          make acceptance-cluster-setup
+          export KUBECONFIG=$PWD/tmp/acceptance-kubeconfig
+          make test-acceptance

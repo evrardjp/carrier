@@ -1,0 +1,62 @@
+run:
+  deadline: 20s
+
+  # don't report issues from these dirs
+  skip-dirs:
+    - vendor
+    - assets
+
+  # skip generated files
+  skip-files:
+  - ".*_fake.go$"
+  - "fake_.*.go$"
+
+linters-settings:
+  dupl:
+    # duplication warning after 400 tokens, increased from 150
+    threshold: 400
+  revive:
+    rules:
+    - name: blank-imports
+      severity: warning
+    - name: unexported-return
+      severity: warning
+
+issues:
+  exclude-rules:
+  # TODO convert the regex to errcheck's new ignore file
+  - linters: [errcheck]
+    text: "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*printf?|os\\.(Un)?Setenv|viper.BindPFlag|viper.BindEnv). is not checked"
+  # Exclude some linters from running on tests files.
+  - linters:
+    - gocyclo
+    - dupl
+    - errcheck
+    - gosec
+    path: _test\.go
+  # Exclude unparam warning for handleError()
+  - linters:
+    - unparam
+    text: "handleError"
+
+linters:
+  disable-all: true
+  enable:
+  - misspell
+  - structcheck
+  - govet
+  - staticcheck
+  - deadcode
+  - errcheck
+  - varcheck
+  - unparam
+  - ineffassign
+  - nakedret
+  - gocyclo
+  - dupl
+  - goimports
+  - revive
+  - gosec
+  - gosimple
+  - typecheck
+  - unused

@@ -1,31 +1,31 @@
 package cli
 
 import (
+	"github.com/epinio/epinio/internal/cli/usercmd"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"github.com/suse/carrier/internal/cli/clients"
 )
 
 var ()
 
-// CmdInfo implements the carrier info command
+// CmdInfo implements the command: epinio info
 var CmdInfo = &cobra.Command{
 	Use:   "info",
-	Short: "Shows information about the Carrier environment",
-	Long:  `Shows status and version for Kubernetes, Gitea, Tekton, Quarks and Eirini.`,
+	Short: "Shows information about the Epinio environment",
+	Long:  `Shows status and versions for epinio's server-side components.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := clients.NewCarrierClient(cmd.Flags())
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
 		if err != nil {
 			return errors.Wrap(err, "error initializing cli")
 		}
 
 		err = client.Info()
 		if err != nil {
-			return errors.Wrap(err, "error retrieving Carrier environment information")
+			return errors.Wrap(err, "error retrieving Epinio environment information")
 		}
 
 		return nil
 	},
-	SilenceErrors: true,
-	SilenceUsage:  true,
 }

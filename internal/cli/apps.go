@@ -2,95 +2,132 @@ package cli
 
 import (
 	"context"
-	"sync"
+	"fmt"
 
+	v1 "github.com/epinio/epinio/internal/api/v1"
+	"github.com/epinio/epinio/internal/cli/usercmd"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"github.com/suse/carrier/internal/cli/clients"
-	"github.com/suse/carrier/termui"
 )
 
 var ()
 
-// CmdApp implements the carrier -app command
+// CmdApp implements the  command: epinio app
 var CmdApp = &cobra.Command{
 	Use:           "app",
 	Aliases:       []string{"apps"},
-	Short:         "Carrier application features",
-	Long:          `Manage carrier application`,
-	Args:          cobra.ExactArgs(0),
+	Short:         "Epinio application features",
+	Long:          `Manage epinio application`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
+	Args:          cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := cmd.Usage(); err != nil {
+			return err
+		}
+		return fmt.Errorf(`Unknown method "%s"`, args[0])
+	},
 }
 
 func init() {
-	CmdApp.AddCommand(CmdAppShow)
+	flags := CmdAppLogs.Flags()
+	flags.Bool("follow", false, "follow the logs of the application")
+	flags.Bool("staging", false, "show the staging logs of the application")
+
+	updateFlags := CmdAppUpdate.Flags()
+	updateFlags.Int32P("instances", "i", 1, "The number of instances the application should have")
+	err := cobra.MarkFlagRequired(updateFlags, "instances")
+	if err != nil {
+		panic(err)
+	}
+
+	flags = CmdAppList.Flags()
+	flags.Bool("all", false, "list all applications")
+
+	CmdApp.AddCommand(CmdAppCreate)
+	CmdApp.AddCommand(CmdAppEnv) // See env.go for implementation
 	CmdApp.AddCommand(CmdAppList)
+	CmdApp.AddCommand(CmdAppLogs)
+	CmdApp.AddCommand(CmdAppShow)
+	CmdApp.AddCommand(CmdAppUpdate)
 	CmdApp.AddCommand(CmdDeleteApp)
-	CmdApp.AddCommand(CmdPush)
+	CmdApp.AddCommand(CmdPush) // See push.go for implementation
 }
 
-// CmdAppList implements the carrier `apps list` command
+// CmdAppList implements the command: epinio app list
 var CmdAppList = &cobra.Command{
-	Use:   "list",
-	Short: "Lists all applications",
+	Use:   "list [--all]",
+	Short: "Lists applications",
+	Long:  "Lists applications in the targeted namespace, or all",
 	Args:  cobra.ExactArgs(0),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: Target remote carrier server instead of starting one
-		port := viper.GetInt("port")
-		httpServerWg := &sync.WaitGroup{}
-		httpServerWg.Add(1)
-		ui := termui.NewUI()
-		srv, listeningPort, err := startCarrierServer(httpServerWg, port, ui)
-		if err != nil {
-			return err
-		}
+		cmd.SilenceUsage = true
 
-		// TODO: NOTE: This is a hack until the server is running inside the cluster
-		cmd.Flags().String("server-url", "http://127.0.0.1:"+listeningPort, "")
-
-		client, err := clients.NewCarrierClient(cmd.Flags())
+		client, err := usercmd.New()
 		if err != nil {
 			return errors.Wrap(err, "error initializing cli")
 		}
 
-		err = client.Apps()
+		all, err := cmd.Flags().GetBool("all")
+		if err != nil {
+			return errors.Wrap(err, "error reading option --all")
+		}
+
+		err = client.Apps(all)
 		if err != nil {
 			return errors.Wrap(err, "error listing apps")
 		}
 
-		if err := srv.Shutdown(context.Background()); err != nil {
-			return err
+		return nil
+	},
+}
+
+// CmdAppCreate implements the command: epinio apps create
+var CmdAppCreate = &cobra.Command{
+	Use:   "create NAME",
+	Short: "Create just the app, without creating a workload",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
+
+		if err != nil {
+			return errors.Wrap(err, "error initializing cli")
 		}
-		httpServerWg.Wait()
+
+		err = client.AppCreate(args[0])
+		if err != nil {
+			return errors.Wrap(err, "error creating app")
+		}
 
 		return nil
 	},
-	SilenceErrors: true,
-	SilenceUsage:  true,
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		app, err := usercmd.New()
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		matches := app.AppsMatching(context.Background(), toComplete)
+
+		return matches, cobra.ShellCompDirectiveNoFileComp
+	},
 }
 
-// CmdAppShow implements the carrier `apps show` command
+// CmdAppShow implements the command: epinio apps show
 var CmdAppShow = &cobra.Command{
 	Use:   "show NAME",
 	Short: "Describe the named application",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// TODO: Target remote carrier server instead of starting one
-		port := viper.GetInt("port")
-		httpServerWg := &sync.WaitGroup{}
-		httpServerWg.Add(1)
-		ui := termui.NewUI()
-		srv, listeningPort, err := startCarrierServer(httpServerWg, port, ui)
-		if err != nil {
-			return err
-		}
+		cmd.SilenceUsage = true
 
-		// TODO: NOTE: This is a hack until the server is running inside the cluster
-		cmd.Flags().String("server-url", "http://127.0.0.1:"+listeningPort, "")
-
-		client, err := clients.NewCarrierClient(cmd.Flags())
+		client, err := usercmd.New()
 
 		if err != nil {
 			return errors.Wrap(err, "error initializing cli")
@@ -98,29 +135,111 @@ var CmdAppShow = &cobra.Command{
 
 		err = client.AppShow(args[0])
 		if err != nil {
-			return errors.Wrap(err, "error listing apps")
+			return errors.Wrap(err, "error showing app")
 		}
-
-		if err := srv.Shutdown(context.Background()); err != nil {
-			return err
-		}
-		httpServerWg.Wait()
 
 		return nil
 	},
-	SilenceErrors: true,
-	SilenceUsage:  true,
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) != 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 
-		app, err := clients.NewCarrierClient(cmd.Flags())
+		app, err := usercmd.New()
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 
-		matches := app.AppsMatching(toComplete)
+		matches := app.AppsMatching(context.Background(), toComplete)
+
+		return matches, cobra.ShellCompDirectiveNoFileComp
+	},
+}
+
+// CmdAppLogs implements the command: epinio apps logs
+var CmdAppLogs = &cobra.Command{
+	Use:   "logs NAME",
+	Short: "Streams the logs of the application",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
+		if err != nil {
+			return errors.Wrap(err, "error initializing cli")
+		}
+
+		follow, err := cmd.Flags().GetBool("follow")
+		if err != nil {
+			return errors.Wrap(err, "error reading option --follow")
+		}
+
+		staging, err := cmd.Flags().GetBool("staging")
+		if err != nil {
+			return errors.Wrap(err, "error reading option --staging")
+		}
+
+		stageID, err := client.AppStageID(args[0])
+		if err != nil {
+			return errors.Wrap(err, "error checking app")
+		}
+		if staging {
+			follow = false
+		} else {
+			stageID = ""
+		}
+
+		err = client.AppLogs(args[0], stageID, follow, nil)
+		if err != nil {
+			return errors.Wrap(err, "error streaming application logs")
+		}
+
+		return nil
+	},
+}
+
+// CmdAppUpdate implements the command: epinio apps update
+// It scales the named app
+var CmdAppUpdate = &cobra.Command{
+	Use:   "update NAME",
+	Short: "Update the named application",
+	Long:  "Update the running application's attributes (e.g. instances)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
+
+		if err != nil {
+			return errors.Wrap(err, "error initializing cli")
+		}
+
+		i, err := instances(cmd)
+		if err != nil {
+			return errors.Wrap(err, "trouble with instances")
+		}
+		if i == nil {
+			d := v1.DefaultInstances
+			i = &d
+		}
+		err = client.AppUpdate(args[0], *i)
+		if err != nil {
+			return errors.Wrap(err, "error updating the app")
+		}
+
+		return nil
+	},
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		app, err := usercmd.New()
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		matches := app.AppsMatching(context.Background(), toComplete)
 
 		return matches, cobra.ShellCompDirectiveNoFileComp
 	},

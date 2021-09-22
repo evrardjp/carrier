@@ -1,5 +1,5 @@
 // Package duration defines the various durations used throughout
-// Carrier, as timeouts, and other.
+// Epinio, as timeouts, and other.
 package duration
 
 import (
@@ -10,31 +10,57 @@ import (
 )
 
 const (
-	systemDomain     = 2 * time.Minute
-	appReady         = 2 * time.Minute
-	deployment       = 5 * time.Minute
-	serviceSecret    = 5 * time.Minute
-	serviceProvision = 5 * time.Minute
-	podReady         = 5 * time.Minute
-	appBuilt         = 10 * time.Minute
-	warmupJobReady   = 30 * time.Minute
+	systemDomain        = 2 * time.Minute
+	appReady            = 2 * time.Minute
+	deployment          = 10 * time.Minute
+	orgDeletion         = 5 * time.Minute
+	serviceSecret       = 5 * time.Minute
+	serviceProvision    = 5 * time.Minute
+	serviceLoadBalancer = 5 * time.Minute
+	podReady            = 5 * time.Minute
+	appBuilt            = 10 * time.Minute
+	warmupJobReady      = 30 * time.Minute
+	certManagerReady    = 5 * time.Minute
+	kubedReady          = 5 * time.Minute
+	secretCopied        = 5 * time.Minute
 
 	// Fixed. __Not__ affected by the multiplier.
 	pollInterval = 3 * time.Second
 	userAbort    = 5 * time.Second
 	logHistory   = 48 * time.Hour
+
+	// Fixed. Standard number of attempts to retry various operations.
+	RetryMax = 10
 )
 
 // Flags adds to viper flags
 func Flags(pf *flag.FlagSet, argToEnv map[string]string) {
 	pf.IntP("timeout-multiplier", "", 1, "Multiply timeouts by this factor")
 	viper.BindPFlag("timeout-multiplier", pf.Lookup("timeout-multiplier"))
-	argToEnv["timeout-multiplier"] = "CARRIER_TIMEOUT_MULTIPLIER"
+	argToEnv["timeout-multiplier"] = "EPINIO_TIMEOUT_MULTIPLIER"
 }
 
-// Multiplier returns the timeout-multiplier argument
+// Multiplier returns the currently active timeout multiplier value
 func Multiplier() time.Duration {
 	return time.Duration(viper.GetInt("timeout-multiplier"))
+}
+
+// ToCertManagerReady returns the duration to wait until giving up on
+// the cert manager deployment to become ready.
+func ToCertManagerReady() time.Duration {
+	return Multiplier() * certManagerReady
+}
+
+// ToKubedReady returns the duration to wait until giving up on the
+// kube demon deployment to become ready.
+func ToKubedReady() time.Duration {
+	return Multiplier() * kubedReady
+}
+
+// ToSecretCopied returns the duration to wait until giving up on a
+// secret getting copied to complete.
+func ToSecretCopied() time.Duration {
+	return Multiplier() * secretCopied
 }
 
 // ToAppBuilt returns the duration to wait until giving up on the
@@ -74,6 +100,11 @@ func ToDeployment() time.Duration {
 	return Multiplier() * deployment
 }
 
+// ToOrgDeletion returns the duration to wait for deletion of namespace
+func ToOrgDeletion() time.Duration {
+	return Multiplier() * orgDeletion
+}
+
 // ToServiceSecret returns the duration to wait for the secret to a
 // catalog service binding to appear
 func ToServiceSecret() time.Duration {
@@ -84,6 +115,11 @@ func ToServiceSecret() time.Duration {
 // service instance to be provisioned
 func ToServiceProvision() time.Duration {
 	return Multiplier() * serviceProvision
+}
+
+// ToServiceLoadBalancer
+func ToServiceLoadBalancer() time.Duration {
+	return Multiplier() * serviceLoadBalancer
 }
 
 //

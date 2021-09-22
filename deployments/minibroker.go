@@ -2,16 +2,15 @@ package deployments
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/epinio/epinio/helpers"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/helpers/termui"
 	"github.com/kyokomi/emoji"
 	"github.com/pkg/errors"
-	"github.com/suse/carrier/helpers"
-	"github.com/suse/carrier/kubernetes"
-	"github.com/suse/carrier/termui"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -20,38 +19,47 @@ type Minibroker struct {
 	Timeout time.Duration
 }
 
+var _ kubernetes.Deployment = &Minibroker{}
+
 const (
 	MinibrokerDeploymentID = "minibroker"
 	minibrokerVersion      = "1.2.0"
 	minibrokerChartFile    = "minibroker-1.2.0.tgz"
 )
 
-func (k *Minibroker) ID() string {
+func (k Minibroker) ID() string {
 	return MinibrokerDeploymentID
-}
-
-func (k *Minibroker) Backup(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
-}
-
-func (k *Minibroker) Restore(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
 }
 
 func (k Minibroker) Describe() string {
 	return emoji.Sprintf(":cloud:Minibroker version: %s\n", minibrokerVersion)
 }
 
+func (k Minibroker) PreDeployCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+	return nil
+}
+
+func (k Minibroker) PostDeleteCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
+	err := c.WaitForNamespaceMissing(ctx, ui, MinibrokerDeploymentID, k.Timeout)
+	if err != nil {
+		return errors.Wrap(err, "failed to delete namespace")
+	}
+
+	ui.Success().Msg("Minibroker removed")
+
+	return nil
+}
+
 // Delete removes Minibroker from kubernetes cluster
-func (k Minibroker) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
+func (k Minibroker) Delete(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
 	ui.Note().KeeplineUnder(1).Msg("Removing Minibroker...")
 
-	existsAndOwned, err := c.NamespaceExistsAndOwned(MinibrokerDeploymentID)
+	existsAndOwned, err := c.NamespaceExistsAndOwned(ctx, MinibrokerDeploymentID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to check if namespace '%s' is owned or not", MinibrokerDeploymentID)
 	}
 	if !existsAndOwned {
-		ui.Exclamation().Msg("Skipping Minibroker because namespace either doesn't exist or not owned by Carrier")
+		ui.Exclamation().Msg("Skipping Minibroker because namespace either doesn't exist or not owned by Epinio")
 		return nil
 	}
 
@@ -63,8 +71,8 @@ func (k Minibroker) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message := "Removing helm release " + MinibrokerDeploymentID
 	out, err := helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			helmCmd := fmt.Sprintf("helm uninstall '%s' --namespace %s", MinibrokerDeploymentID, MinibrokerDeploymentID)
-			return helpers.RunProc(helmCmd, currentdir, k.Debug)
+			return helpers.RunProc(currentdir, k.Debug,
+				"helm", "uninstall", MinibrokerDeploymentID, "--namespace", MinibrokerDeploymentID)
 		},
 	)
 	if err != nil {
@@ -78,27 +86,26 @@ func (k Minibroker) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message = "Deleting Minibroker namespace " + MinibrokerDeploymentID
 	_, err = helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			return "", c.DeleteNamespace(MinibrokerDeploymentID)
+			return "", c.DeleteNamespace(ctx, MinibrokerDeploymentID)
 		},
 	)
 	if err != nil {
 		return errors.Wrapf(err, "Failed deleting namespace %s", MinibrokerDeploymentID)
 	}
 
-	err = c.WaitForNamespaceMissing(ui, MinibrokerDeploymentID, k.Timeout)
-	if err != nil {
-		return errors.Wrap(err, "failed to delete namespace")
-	}
-
-	ui.Success().Msg("Minibroker removed")
-
 	return nil
 }
 
-func (k Minibroker) apply(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions, upgrade bool) error {
+func (k Minibroker) apply(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, _ kubernetes.InstallationOptions, upgrade bool) error {
 	action := "install"
 	if upgrade {
 		action = "upgrade"
+	}
+
+	if err := c.CreateNamespace(ctx, MinibrokerDeploymentID, map[string]string{
+		kubernetes.EpinioDeploymentLabelKey: kubernetes.EpinioDeploymentLabelValue,
+	}, map[string]string{"linkerd.io/inject": "enabled"}); err != nil {
+		return err
 	}
 
 	currentdir, err := os.Getwd()
@@ -112,19 +119,15 @@ func (k Minibroker) apply(c *kubernetes.Cluster, ui *termui.UI, options kubernet
 	}
 	defer os.Remove(tarPath)
 
-	helmCmd := fmt.Sprintf("helm %s %s --create-namespace --namespace %s %s", action, MinibrokerDeploymentID, MinibrokerDeploymentID, tarPath)
-	if out, err := helpers.RunProc(helmCmd, currentdir, k.Debug); err != nil {
+	if out, err := helpers.RunProc(currentdir, k.Debug,
+		"helm", action, MinibrokerDeploymentID, "--namespace", MinibrokerDeploymentID, tarPath); err != nil {
 		return errors.New("Failed installing Minibroker: " + out)
 	}
 
-	err = c.LabelNamespace(MinibrokerDeploymentID, kubernetes.CarrierDeploymentLabelKey, kubernetes.CarrierDeploymentLabelValue)
-	if err != nil {
-		return err
-	}
-	if err := c.WaitUntilPodBySelectorExist(ui, MinibrokerDeploymentID, "app=minibroker-minibroker", k.Timeout); err != nil {
+	if err := c.WaitUntilPodBySelectorExist(ctx, ui, MinibrokerDeploymentID, "app=minibroker-minibroker", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting Minibroker to come up")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, MinibrokerDeploymentID, "app=minibroker-minibroker", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, MinibrokerDeploymentID, "app=minibroker-minibroker", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting Minibroker to come be running")
 	}
 
@@ -137,8 +140,8 @@ func (k Minibroker) GetVersion() string {
 	return minibrokerVersion
 }
 
-func (k Minibroker) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
-	existsAndOwned, err := c.NamespaceExistsAndOwned(MinibrokerDeploymentID)
+func (k Minibroker) Deploy(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+	existsAndOwned, err := c.NamespaceExistsAndOwned(ctx, MinibrokerDeploymentID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to check if namespace '%s' is owned or not", MinibrokerDeploymentID)
 	}
@@ -149,7 +152,7 @@ func (k Minibroker) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kuberne
 
 	ui.Note().KeeplineUnder(1).Msg("Deploying Minibroker...")
 
-	err = k.apply(c, ui, options, false)
+	err = k.apply(ctx, c, ui, options, false)
 	if err != nil {
 		return err
 	}
@@ -157,9 +160,9 @@ func (k Minibroker) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kuberne
 	return nil
 }
 
-func (k Minibroker) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+func (k Minibroker) Upgrade(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
 	_, err := c.Kubectl.CoreV1().Namespaces().Get(
-		context.Background(),
+		ctx,
 		MinibrokerDeploymentID,
 		metav1.GetOptions{},
 	)
@@ -169,5 +172,5 @@ func (k Minibroker) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options kubern
 
 	ui.Note().Msg("Upgrading Minibroker...")
 
-	return k.apply(c, ui, options, true)
+	return k.apply(ctx, c, ui, options, true)
 }

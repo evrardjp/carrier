@@ -1,3 +1,5 @@
+// Package cli contains all definitions pertaining to the user-visible
+// commands of the epinio client. It provides the viper/cobra setup.
 package cli
 
 import (
@@ -5,58 +7,79 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
+	"github.com/epinio/epinio/helpers/kubernetes/config"
+	"github.com/epinio/epinio/helpers/tracelog"
+	pconfig "github.com/epinio/epinio/internal/cli/config"
+	"github.com/epinio/epinio/internal/duration"
+	"github.com/epinio/epinio/internal/version"
 	"github.com/kyokomi/emoji"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	pconfig "github.com/suse/carrier/internal/cli/config"
-	"github.com/suse/carrier/internal/duration"
-	"github.com/suse/carrier/kubernetes/config"
-	"github.com/suse/carrier/version"
 )
 
 var (
 	flagConfigFile string
-	kubeconfig     string
 )
 
-// Execute adds all child commands to the root command sets flags appropriately.
+// NewEpinioCLI returns the main `epinio` cli.
+func NewEpinioCLI() *cobra.Command {
+	return rootCmd
+}
+
+var rootCmd = &cobra.Command{
+	Use:           "epinio",
+	Short:         "Epinio cli",
+	Long:          `epinio cli is the official command line interface for Epinio PaaS `,
+	Version:       version.Version,
+	SilenceErrors: true,
+}
+
+// Execute executes the root command.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	ExitfIfError(checkDependencies(), "Cannot operate")
-
-	rootCmd := &cobra.Command{
-		Use:           "carrier",
-		Short:         "Carrier cli",
-		Long:          `carrier cli is the official command line interface for Carrier PaaS `,
-		Version:       fmt.Sprintf("%s", version.Version),
-		SilenceErrors: true,
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
 	}
+}
 
+func init() {
 	pf := rootCmd.PersistentFlags()
 	argToEnv := map[string]string{}
 
 	pf.StringVarP(&flagConfigFile, "config-file", "", pconfig.DefaultLocation(),
 		"set path of configuration file")
 	viper.BindPFlag("config-file", pf.Lookup("config-file"))
-	argToEnv["config-file"] = "CARRIER_CONFIG"
+	argToEnv["config-file"] = "EPINIO_CONFIG"
 
 	config.KubeConfigFlags(pf, argToEnv)
-	config.LoggerFlags(pf, argToEnv)
+	tracelog.LoggerFlags(pf, argToEnv)
 	duration.Flags(pf, argToEnv)
 
 	pf.IntP("verbosity", "", 0, "Only print progress messages at or above this level (0 or 1, default 0)")
 	viper.BindPFlag("verbosity", pf.Lookup("verbosity"))
 	argToEnv["verbosity"] = "VERBOSITY"
 
+	pf.BoolP("skip-ssl-verification", "", false, "Skip the verification of TLS certificates")
+	viper.BindPFlag("skip-ssl-verification", pf.Lookup("skip-ssl-verification"))
+	argToEnv["skip-ssl-verification"] = "SKIP_SSL_VERIFICATION"
+
+	pf.BoolP("no-colors", "", false, "Suppress colorized output")
+	viper.BindPFlag("no-colors", pf.Lookup("no-colors"))
+	argToEnv["colors"] = "EPINIO_COLORS"
+
 	config.AddEnvToUsage(rootCmd, argToEnv)
 
 	rootCmd.AddCommand(CmdCompletion)
+	rootCmd.AddCommand(CmdConfig)
 	rootCmd.AddCommand(CmdInstall)
+	rootCmd.AddCommand(CmdInstallIngress)
+	rootCmd.AddCommand(CmdInstallCertManager)
 	rootCmd.AddCommand(CmdUninstall)
 	rootCmd.AddCommand(CmdInfo)
-	rootCmd.AddCommand(CmdOrgs)
-	rootCmd.AddCommand(CmdCreateOrg)
+	rootCmd.AddCommand(CmdNamespace)
 	rootCmd.AddCommand(CmdPush)
 	rootCmd.AddCommand(CmdApp)
 	rootCmd.AddCommand(CmdTarget)
@@ -64,25 +87,30 @@ func Execute() {
 	rootCmd.AddCommand(CmdDisable)
 	rootCmd.AddCommand(CmdService)
 	rootCmd.AddCommand(CmdServer)
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
+	rootCmd.AddCommand(cmdVersion)
+	// Hidden command providing developer tools
+	rootCmd.AddCommand(CmdDebug)
 }
 
+var cmdVersion = &cobra.Command{
+	Use:   "version",
+	Short: "Print the version number",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("Epinio Version: %s\n", version.Version)
+		fmt.Printf("Go Version: %s\n", runtime.Version())
+	},
+}
+
+// checkDependencies is a helper which checks the client's environment
+// for the presence of a number of required supporting commands.
 func checkDependencies() error {
 	ok := true
 
 	dependencies := []struct {
 		CommandName string
 	}{
-		// update the 'prerequisites' of docs/install.md if you make changes here
 		{CommandName: "kubectl"},
 		{CommandName: "helm"},
-		{CommandName: "sh"},
-		{CommandName: "git"},
-		{CommandName: "openssl"},
 	}
 
 	for _, dependency := range dependencies {

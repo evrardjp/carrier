@@ -1,20 +1,22 @@
 package cli
 
 import (
+	"github.com/epinio/epinio/internal/cli/usercmd"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"github.com/suse/carrier/internal/cli/clients"
 )
 
 var ()
 
-// CmdTarget implements the carrier target command
+// CmdTarget implements the command: epinio target
 var CmdTarget = &cobra.Command{
-	Use:   "target [org]",
-	Short: "Targets an organization in Carrier.",
+	Use:   "target [namespace]",
+	Short: "Targets an epinio-controlled namespace.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := clients.NewCarrierClient(cmd.Flags())
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
 		if err != nil {
 			return errors.Wrap(err, "error initializing cli")
 		}
@@ -31,14 +33,12 @@ var CmdTarget = &cobra.Command{
 
 		return nil
 	},
-	SilenceErrors: true,
-	SilenceUsage:  true,
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) != 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 
-		app, err := clients.NewCarrierClient(cmd.Flags())
+		app, err := usercmd.New()
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}

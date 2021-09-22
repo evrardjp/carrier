@@ -2,16 +2,15 @@ package deployments
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/epinio/epinio/helpers"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/helpers/termui"
 	"github.com/kyokomi/emoji"
 	"github.com/pkg/errors"
-	"github.com/suse/carrier/helpers"
-	"github.com/suse/carrier/kubernetes"
-	"github.com/suse/carrier/termui"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -20,38 +19,47 @@ type ServiceCatalog struct {
 	Timeout time.Duration
 }
 
+var _ kubernetes.Deployment = &ServiceCatalog{}
+
 const (
 	ServiceCatalogDeploymentID = "service-catalog"
 	serviceCatalogVersion      = "0.3.1"
 	serviceCatalogChartFile    = "catalog-0.3.1.tgz"
 )
 
-func (k *ServiceCatalog) ID() string {
+func (k ServiceCatalog) ID() string {
 	return ServiceCatalogDeploymentID
-}
-
-func (k *ServiceCatalog) Backup(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
-}
-
-func (k *ServiceCatalog) Restore(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
 }
 
 func (k ServiceCatalog) Describe() string {
 	return emoji.Sprintf(":cloud:Service Catalog version: %s\n", serviceCatalogVersion)
 }
 
+func (k ServiceCatalog) PreDeployCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+	return nil
+}
+
+func (k ServiceCatalog) PostDeleteCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
+	err := c.WaitForNamespaceMissing(ctx, ui, ServiceCatalogDeploymentID, k.Timeout)
+	if err != nil {
+		return errors.Wrap(err, "failed to delete namespace")
+	}
+
+	ui.Success().Msg("ServiceCatalog removed")
+
+	return nil
+}
+
 // Delete removes ServiceCatalog from kubernetes cluster
-func (k ServiceCatalog) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
+func (k ServiceCatalog) Delete(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
 	ui.Note().KeeplineUnder(1).Msg("Removing ServiceCatalog...")
 
-	existsAndOwned, err := c.NamespaceExistsAndOwned(ServiceCatalogDeploymentID)
+	existsAndOwned, err := c.NamespaceExistsAndOwned(ctx, ServiceCatalogDeploymentID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to check if namespace '%s' is owned or not", ServiceCatalogDeploymentID)
 	}
 	if !existsAndOwned {
-		ui.Exclamation().Msg("Skipping ServiceCatalog because namespace either doesn't exist or not owned by Carrier")
+		ui.Exclamation().Msg("Skipping ServiceCatalog because namespace either doesn't exist or not owned by Epinio")
 		return nil
 	}
 
@@ -63,8 +71,8 @@ func (k ServiceCatalog) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message := "Removing helm release " + ServiceCatalogDeploymentID
 	out, err := helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			helmCmd := fmt.Sprintf("helm uninstall '%s' --namespace %s", ServiceCatalogDeploymentID, ServiceCatalogDeploymentID)
-			return helpers.RunProc(helmCmd, currentdir, k.Debug)
+			return helpers.RunProc(currentdir, k.Debug,
+				"helm", "uninstall", ServiceCatalogDeploymentID, "--namespace", ServiceCatalogDeploymentID)
 		},
 	)
 	if err != nil {
@@ -78,22 +86,26 @@ func (k ServiceCatalog) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message = "Deleting ServiceCatalog namespace " + ServiceCatalogDeploymentID
 	_, err = helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			return "", c.DeleteNamespace(ServiceCatalogDeploymentID)
+			return "", c.DeleteNamespace(ctx, ServiceCatalogDeploymentID)
 		},
 	)
 	if err != nil {
 		return errors.Wrapf(err, "Failed deleting namespace %s", ServiceCatalogDeploymentID)
 	}
 
-	ui.Success().Msg("ServiceCatalog removed")
-
 	return nil
 }
 
-func (k ServiceCatalog) apply(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions, upgrade bool) error {
+func (k ServiceCatalog) apply(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, _ kubernetes.InstallationOptions, upgrade bool) error {
 	action := "install"
 	if upgrade {
 		action = "upgrade"
+	}
+
+	if err := c.CreateNamespace(ctx, ServiceCatalogDeploymentID, map[string]string{
+		kubernetes.EpinioDeploymentLabelKey: kubernetes.EpinioDeploymentLabelValue,
+	}, map[string]string{}); err != nil {
+		return err
 	}
 
 	currentdir, err := os.Getwd()
@@ -107,31 +119,27 @@ func (k ServiceCatalog) apply(c *kubernetes.Cluster, ui *termui.UI, options kube
 	}
 	defer os.Remove(tarPath)
 
-	helmCmd := fmt.Sprintf("helm %s %s --create-namespace --namespace %s %s", action, ServiceCatalogDeploymentID, ServiceCatalogDeploymentID, tarPath)
-	if out, err := helpers.RunProc(helmCmd, currentdir, k.Debug); err != nil {
+	if out, err := helpers.RunProc(currentdir, k.Debug,
+		"helm", action, ServiceCatalogDeploymentID, "--namespace", ServiceCatalogDeploymentID, tarPath); err != nil {
 		return errors.New("Failed installing ServiceCatalog: " + out)
 	}
 
-	err = c.LabelNamespace(ServiceCatalogDeploymentID, kubernetes.CarrierDeploymentLabelKey, kubernetes.CarrierDeploymentLabelValue)
-	if err != nil {
-		return err
-	}
-	if err := c.WaitUntilPodBySelectorExist(ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-controller-manager", k.Timeout); err != nil {
+	if err := c.WaitUntilPodBySelectorExist(ctx, ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-controller-manager", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting ServiceCatalog controller manager to come up")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-controller-manager", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-controller-manager", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting ServiceCatalog controller manager to come be running")
 	}
-	if err := c.WaitUntilPodBySelectorExist(ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
+	if err := c.WaitUntilPodBySelectorExist(ctx, ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting ServiceCatalog webhook to come up")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting ServiceCatalog webhook to come be running")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, ServiceCatalogDeploymentID, "app=service-catalog-catalog-webhook", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting ServiceCatalog webhook to come be running")
 	}
-	if err = c.WaitForCRD(ui, "clusterservicebrokers.servicecatalog.k8s.io", k.Timeout); err != nil {
+	if err = c.WaitForCRD(ctx, ui, "clusterservicebrokers.servicecatalog.k8s.io", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting for CRD clusterservicebrokers.servicecatalog.k8s.io to become available")
 	}
 
@@ -144,10 +152,10 @@ func (k ServiceCatalog) GetVersion() string {
 	return serviceCatalogVersion
 }
 
-func (k ServiceCatalog) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+func (k ServiceCatalog) Deploy(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
 
 	_, err := c.Kubectl.CoreV1().Namespaces().Get(
-		context.Background(),
+		ctx,
 		ServiceCatalogDeploymentID,
 		metav1.GetOptions{},
 	)
@@ -157,7 +165,7 @@ func (k ServiceCatalog) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kub
 
 	ui.Note().KeeplineUnder(1).Msg("Deploying ServiceCatalog...")
 
-	err = k.apply(c, ui, options, false)
+	err = k.apply(ctx, c, ui, options, false)
 	if err != nil {
 		return err
 	}
@@ -165,9 +173,9 @@ func (k ServiceCatalog) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kub
 	return nil
 }
 
-func (k ServiceCatalog) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+func (k ServiceCatalog) Upgrade(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
 	_, err := c.Kubectl.CoreV1().Namespaces().Get(
-		context.Background(),
+		ctx,
 		ServiceCatalogDeploymentID,
 		metav1.GetOptions{},
 	)
@@ -177,5 +185,5 @@ func (k ServiceCatalog) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options ku
 
 	ui.Note().Msg("Upgrading ServiceCatalog...")
 
-	return k.apply(c, ui, options, true)
+	return k.apply(ctx, c, ui, options, true)
 }

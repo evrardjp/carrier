@@ -3,36 +3,34 @@ package web
 import (
 	"net/http"
 
-	"github.com/suse/carrier/internal/cli/clients"
-	"github.com/suse/carrier/version"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/internal/version"
 )
 
+// InfoController represents all functionality of the dashboard related to epinio inspection
 type InfoController struct {
 }
 
+// Index handles the dashboard's /info endpoint. It returns version information for various epinio components.
 func (hc InfoController) Index(w http.ResponseWriter, r *http.Request) {
-	client, err := clients.NewCarrierClient(nil)
+	ctx := r.Context()
+
+	cluster, err := kubernetes.GetCluster(ctx)
 	if handleError(w, err, 500) {
 		return
 	}
 
-	platform := client.KubeClient.GetPlatform()
-	kubeVersion, err := client.KubeClient.GetVersion()
+	platform := cluster.GetPlatform()
+	kubeVersion, err := cluster.GetVersion()
 	if handleError(w, err, 500) {
 		return
-	}
-	giteaVersion := "unavailable"
-	giteaFetchedVersion, resp, err := client.GiteaClient.Client.ServerVersion()
-	if err == nil && resp != nil && resp.StatusCode == 200 {
-		giteaVersion = giteaFetchedVersion
 	}
 
 	data := map[string]interface{}{
-		"version":      version.Version,
-		"platform":     platform.String(),
-		"kubeVersion":  kubeVersion,
-		"giteaVersion": giteaVersion,
+		"version":     version.Version,
+		"platform":    platform.String(),
+		"kubeVersion": kubeVersion,
 	}
 
-	Render([]string{"main_layout", "icons", "info"}, w, r, data)
+	Render([]string{"main_layout", "icons", "info", "modals"}, w, r, data)
 }

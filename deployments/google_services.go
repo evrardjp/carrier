@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/epinio/epinio/helpers"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/helpers/termui"
 	"github.com/kyokomi/emoji"
 	"github.com/pkg/errors"
-	"github.com/suse/carrier/helpers"
-	"github.com/suse/carrier/kubernetes"
-	"github.com/suse/carrier/termui"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -22,38 +22,47 @@ type GoogleServices struct {
 	Timeout time.Duration
 }
 
+var _ kubernetes.Deployment = &GoogleServices{}
+
 const (
 	GoogleServicesDeploymentID = "google-service-broker"
 	googleServicesVersion      = "0.1.0"
 	googleServicesChartFile    = "gcp-service-broker-0.1.0.tgz"
 )
 
-func (k *GoogleServices) ID() string {
+func (k GoogleServices) ID() string {
 	return GoogleServicesDeploymentID
-}
-
-func (k *GoogleServices) Backup(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
-}
-
-func (k *GoogleServices) Restore(c *kubernetes.Cluster, ui *termui.UI, d string) error {
-	return nil
 }
 
 func (k GoogleServices) Describe() string {
 	return emoji.Sprintf(":cloud:GoogleServices version: %s\n", googleServicesVersion)
 }
 
+func (k GoogleServices) PreDeployCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+	return nil
+}
+
+func (k GoogleServices) PostDeleteCheck(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
+	err := c.WaitForNamespaceMissing(ctx, ui, GoogleServicesDeploymentID, k.Timeout)
+	if err != nil {
+		return errors.Wrap(err, "failed to delete namespace")
+	}
+
+	ui.Success().Msg("GoogleServices removed")
+
+	return nil
+}
+
 // Delete removes GoogleServices from kubernetes cluster
-func (k GoogleServices) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
+func (k GoogleServices) Delete(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI) error {
 	ui.Note().KeeplineUnder(1).Msg("Removing GoogleServices...")
 
-	existsAndOwned, err := c.NamespaceExistsAndOwned(GoogleServicesDeploymentID)
+	existsAndOwned, err := c.NamespaceExistsAndOwned(ctx, GoogleServicesDeploymentID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to check if namespace '%s' is owned or not", GoogleServicesDeploymentID)
 	}
 	if !existsAndOwned {
-		ui.Exclamation().Msg("Skipping GoogleServices because namespace either doesn't exist or not owned by Carrier")
+		ui.Exclamation().Msg("Skipping GoogleServices because namespace either doesn't exist or not owned by Epinio")
 		return nil
 	}
 
@@ -65,8 +74,8 @@ func (k GoogleServices) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message := "Removing helm release " + GoogleServicesDeploymentID
 	out, err := helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			helmCmd := fmt.Sprintf("helm uninstall '%s' --namespace %s", GoogleServicesDeploymentID, GoogleServicesDeploymentID)
-			return helpers.RunProc(helmCmd, currentdir, k.Debug)
+			return helpers.RunProc(currentdir, k.Debug,
+				"helm", "uninstall", GoogleServicesDeploymentID, "--namespace", GoogleServicesDeploymentID)
 		},
 	)
 	if err != nil {
@@ -80,27 +89,26 @@ func (k GoogleServices) Delete(c *kubernetes.Cluster, ui *termui.UI) error {
 	message = "Deleting GoogleServices namespace " + GoogleServicesDeploymentID
 	_, err = helpers.WaitForCommandCompletion(ui, message,
 		func() (string, error) {
-			return "", c.DeleteNamespace(GoogleServicesDeploymentID)
+			return "", c.DeleteNamespace(ctx, GoogleServicesDeploymentID)
 		},
 	)
 	if err != nil {
 		return errors.Wrapf(err, "Failed deleting namespace %s", GoogleServicesDeploymentID)
 	}
 
-	err = c.WaitForNamespaceMissing(ui, GoogleServicesDeploymentID, k.Timeout)
-	if err != nil {
-		return errors.Wrap(err, "failed to delete namespace")
-	}
-
-	ui.Success().Msg("GoogleServices removed")
-
 	return nil
 }
 
-func (k GoogleServices) apply(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions, upgrade bool) error {
+func (k GoogleServices) apply(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions, upgrade bool) error {
 	action := "install"
 	if upgrade {
 		action = "upgrade"
+	}
+
+	if err := c.CreateNamespace(ctx, GoogleServicesDeploymentID, map[string]string{
+		kubernetes.EpinioDeploymentLabelKey: kubernetes.EpinioDeploymentLabelValue,
+	}, map[string]string{"linkerd.io/inject": "enabled"}); err != nil {
+		return err
 	}
 
 	currentdir, err := os.Getwd()
@@ -135,32 +143,27 @@ func (k GoogleServices) apply(c *kubernetes.Cluster, ui *termui.UI, options kube
 	valuesYaml := fmt.Sprintf(`
 broker:
   service_account_json: '%s'`, strings.Replace(string(jsonContent), "\n", "", -1))
-	err = ioutil.WriteFile(valuesYamlPath, []byte(valuesYaml), 0644)
+	err = ioutil.WriteFile(valuesYamlPath, []byte(valuesYaml), 0600)
 	if err != nil {
 		return err
 	}
 
-	helmCmd := fmt.Sprintf("helm %s %s --create-namespace --namespace %s --values %s %s", action, GoogleServicesDeploymentID, GoogleServicesDeploymentID, valuesYamlPath, tarPath)
-	if out, err := helpers.RunProc(helmCmd, currentdir, k.Debug); err != nil {
+	if out, err := helpers.RunProc(currentdir, k.Debug,
+		"helm", action, GoogleServicesDeploymentID, "--namespace", GoogleServicesDeploymentID, "--values", valuesYamlPath, tarPath); err != nil {
 		return errors.New("Failed installing GoogleServices: " + out)
 	}
 
-	err = c.LabelNamespace(GoogleServicesDeploymentID, kubernetes.CarrierDeploymentLabelKey, kubernetes.CarrierDeploymentLabelValue)
-	if err != nil {
-		return err
-	}
-
-	if err := c.WaitUntilPodBySelectorExist(ui, GoogleServicesDeploymentID, "app=google-service-broker-mysql", k.Timeout); err != nil {
+	if err := c.WaitUntilPodBySelectorExist(ctx, ui, GoogleServicesDeploymentID, "app=google-service-broker-mysql", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting GoogleServices database to come up")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, GoogleServicesDeploymentID, "app=google-service-broker-mysql", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, GoogleServicesDeploymentID, "app=google-service-broker-mysql", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting GoogleServices database to be running")
 	}
 
-	if err := c.WaitUntilPodBySelectorExist(ui, GoogleServicesDeploymentID, "app.kubernetes.io/name=gcp-service-broker", k.Timeout); err != nil {
+	if err := c.WaitUntilPodBySelectorExist(ctx, ui, GoogleServicesDeploymentID, "app.kubernetes.io/name=gcp-service-broker", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting GoogleServices to come up")
 	}
-	if err := c.WaitForPodBySelectorRunning(ui, GoogleServicesDeploymentID, "app.kubernetes.io/name=gcp-service-broker", k.Timeout); err != nil {
+	if err := c.WaitForPodBySelectorRunning(ctx, ui, GoogleServicesDeploymentID, "app.kubernetes.io/name=gcp-service-broker", k.Timeout); err != nil {
 		return errors.Wrap(err, "failed waiting GoogleServices to be running")
 	}
 
@@ -173,8 +176,8 @@ func (k GoogleServices) GetVersion() string {
 	return googleServicesVersion
 }
 
-func (k GoogleServices) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
-	existsAndOwned, err := c.NamespaceExistsAndOwned(GoogleServicesDeploymentID)
+func (k GoogleServices) Deploy(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+	existsAndOwned, err := c.NamespaceExistsAndOwned(ctx, GoogleServicesDeploymentID)
 	if err != nil {
 		return errors.Wrapf(err, "failed to check if namespace '%s' is owned or not", MinibrokerDeploymentID)
 	}
@@ -185,7 +188,7 @@ func (k GoogleServices) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kub
 
 	ui.Note().KeeplineUnder(1).Msg("Deploying GoogleServices...")
 
-	err = k.apply(c, ui, options, false)
+	err = k.apply(ctx, c, ui, options, false)
 	if err != nil {
 		return err
 	}
@@ -193,9 +196,9 @@ func (k GoogleServices) Deploy(c *kubernetes.Cluster, ui *termui.UI, options kub
 	return nil
 }
 
-func (k GoogleServices) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
+func (k GoogleServices) Upgrade(ctx context.Context, c *kubernetes.Cluster, ui *termui.UI, options kubernetes.InstallationOptions) error {
 	_, err := c.Kubectl.CoreV1().Namespaces().Get(
-		context.Background(),
+		ctx,
 		GoogleServicesDeploymentID,
 		metav1.GetOptions{},
 	)
@@ -205,5 +208,5 @@ func (k GoogleServices) Upgrade(c *kubernetes.Cluster, ui *termui.UI, options ku
 
 	ui.Note().Msg("Upgrading GoogleServices...")
 
-	return k.apply(c, ui, options, true)
+	return k.apply(ctx, c, ui, options, true)
 }

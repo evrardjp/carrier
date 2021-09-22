@@ -2,42 +2,174 @@ package cli
 
 import (
 	"os"
+	"strings"
 
+	v1 "github.com/epinio/epinio/internal/api/v1"
+	"github.com/epinio/epinio/internal/cli/usercmd"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
-	"github.com/suse/carrier/internal/cli/clients"
+	"github.com/spf13/pflag"
 )
 
 var ()
 
-// CmdPush implements the carrier orgs command
+func init() {
+	CmdPush.Flags().String("builder-image", "paketobuildpacks/builder:full", "paketo builder image to use for staging")
+	CmdPush.Flags().Int32P("instances", "i", v1.DefaultInstances,
+		"The number of desired instances for the application, default only applies to new deployments")
+	CmdPush.Flags().String("git", "", "git revision of sources. PATH becomes repository location")
+	CmdPush.Flags().String("docker-image-url", "", "docker image url for the app workload image")
+	CmdPush.Flags().StringSliceP("bind", "b", []string{}, "services to bind immediately")
+	// nolint:errcheck // Unable to handle error in init block
+	CmdPush.RegisterFlagCompletionFunc("bind",
+		func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			// `cmd`, `args` are ignored.
+			// `toComplete` is the option value entered so far.
+			// This is a StringSlice option.
+			// This means that the option value is a comma-separated
+			// string of values.
+			// Completion has to happen only for the last segment in
+			// that string, i.e. after the last comma.  Note that
+			// cobra does not feed us a slice, just the string.  We
+			// are responsible for splitting into segments, and
+			// expanding only the last segment.
+
+			ctx := cmd.Context()
+
+			app, err := usercmd.New()
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+
+			values := strings.Split(toComplete, ",")
+			if len(values) == 0 {
+				// Nothing. Report all possible matches
+				matches := app.ServiceMatching(ctx, toComplete)
+				return matches, cobra.ShellCompDirectiveNoFileComp
+			}
+
+			// Expand the last segment. The returned matches are
+			// the string with its last segment replaced by the
+			// expansions for that segment.
+
+			matches := []string{}
+			for _, match := range app.ServiceMatching(ctx, values[len(values)-1]) {
+				values[len(values)-1] = match
+				matches = append(matches, strings.Join(values, ","))
+			}
+
+			return matches, cobra.ShellCompDirectiveDefault
+		})
+}
+
+// instances checks if the user provided an instance count. If they didn't, then we'll
+// pass nil and either use the default or whatever is deployed in the cluster.
+func instances(cmd *cobra.Command) (*int32, error) {
+	var i *int32
+	instances, err := cmd.Flags().GetInt32("instances")
+	if err != nil {
+		cmd.SilenceUsage = false
+		return i, errors.Wrap(err, "could not read instances parameter")
+	}
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if f.Name == "instances" {
+			n := int32(instances)
+			i = &n
+		}
+	})
+	return i, nil
+}
+
+// CmdPush implements the command: epinio app push
 var CmdPush = &cobra.Command{
-	Use:   "push NAME [PATH_TO_APPLICATION_SOURCES]",
+	Use:   "push NAME [URL|PATH_TO_APPLICATION_SOURCES]",
 	Short: "Push an application from the specified directory, or the current working directory",
 	Args:  cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := clients.NewCarrierClient(cmd.Flags())
+		cmd.SilenceUsage = true
+
+		client, err := usercmd.New()
 		if err != nil {
 			return errors.Wrap(err, "error initializing cli")
 		}
 
+		gitRevision, err := cmd.Flags().GetString("git")
+		if err != nil {
+			return errors.Wrap(err, "could not read option --git")
+		}
+
+		dockerImageURL, err := cmd.Flags().GetString("docker-image-url")
+		if err != nil {
+			return errors.Wrap(err, "could not read option --docker-image-url")
+		}
+
+		if gitRevision != "" && dockerImageURL != "" {
+			return errors.Wrap(err, "cannot use both, git and docker image url")
+		}
+
+		builderImage, err := cmd.Flags().GetString("builder-image")
+		if err != nil {
+			return errors.Wrap(err, "could not read option --builder-image")
+		}
+
+		// Syntax:
+		// 1. push NAME
+		// 2. push NAME PATH
+		// 3. push NAME URL --git REV
+		// 4. push NAME --docker-image-url URL
+
 		var path string
 		if len(args) == 1 {
+			if gitRevision != "" {
+				// Missing argument is user error. Show usage
+				cmd.SilenceUsage = false
+				return errors.New("app name or git repository url missing")
+			}
+
 			path, err = os.Getwd()
 			if err != nil {
-				return errors.Wrap(err, "error pushing app")
+				return errors.Wrap(err, "working directory not accessible")
 			}
 		} else {
 			path = args[1]
 		}
 
-		err = client.Push(args[0], path)
+		if dockerImageURL != "" {
+			path = ""
+		}
+
+		if gitRevision == "" && dockerImageURL == "" {
+			if _, err := os.Stat(path); err != nil {
+				// Path issue is user error. Show usage
+				cmd.SilenceUsage = false
+				return errors.Wrap(err, "path not accessible")
+			}
+		}
+
+		i, err := instances(cmd)
 		if err != nil {
-			return errors.Wrap(err, "error pushing app")
+			return errors.Wrap(err, "trouble with instances")
+		}
+		params := usercmd.PushParams{
+			Name:         args[0],
+			Instances:    i,
+			GitRev:       gitRevision,
+			Docker:       dockerImageURL,
+			Path:         path,
+			BuilderImage: builderImage,
+		}
+
+		services, err := cmd.Flags().GetStringSlice("bind")
+		if err != nil {
+			return errors.Wrap(err, "failed to read option --bind")
+		}
+		params.Services = services
+
+		err = client.Push(cmd.Context(), params)
+		if err != nil {
+			return errors.Wrap(err, "error pushing app to server")
 		}
 
 		return nil
 	},
-	SilenceErrors: true,
-	SilenceUsage:  true,
 }

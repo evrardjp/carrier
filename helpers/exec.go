@@ -7,24 +7,23 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/codeskyblue/kexec"
 	"github.com/pkg/errors"
 
-	"github.com/suse/carrier/termui"
+	"github.com/epinio/epinio/helpers/termui"
 )
 
 type ExternalFuncWithString func() (output string, err error)
 
 type ExternalFunc func() (err error)
 
-func RunProc(cmd, dir string, toStdout bool) (string, error) {
+func RunProc(dir string, toStdout bool, cmd string, args ...string) (string, error) {
 	if os.Getenv("DEBUG") == "true" {
-		fmt.Println("Executing ", cmd)
+		fmt.Printf("Executing: %s %v (in: %s)\n", cmd, args, dir)
 	}
-	p := kexec.CommandString(cmd)
+	p := kexec.Command(cmd, args...)
 
 	var b bytes.Buffer
 	if toStdout {
@@ -45,11 +44,11 @@ func RunProc(cmd, dir string, toStdout bool) (string, error) {
 	return b.String(), err
 }
 
-func RunProcNoErr(cmd, dir string, toStdout bool) (string, error) {
+func RunProcNoErr(dir string, toStdout bool, cmd string, args ...string) (string, error) {
 	if os.Getenv("DEBUG") == "true" {
-		fmt.Println("Executing ", cmd)
+		fmt.Printf("Executing %s %v\n", cmd, args)
 	}
-	p := kexec.CommandString(cmd)
+	p := kexec.Command(cmd, args...)
 
 	var b bytes.Buffer
 	if toStdout {
@@ -73,7 +72,7 @@ func RunProcNoErr(cmd, dir string, toStdout bool) (string, error) {
 // CreateTmpFile creates a temporary file on the disk with the given contents
 // and returns the path to it and an error if something goes wrong.
 func CreateTmpFile(contents string) (string, error) {
-	tmpfile, err := ioutil.TempFile("", "carrier")
+	tmpfile, err := ioutil.TempFile("", "epinio")
 	if err != nil {
 		return tmpfile.Name(), err
 	}
@@ -87,9 +86,9 @@ func CreateTmpFile(contents string) (string, error) {
 	return tmpfile.Name(), nil
 }
 
-// Kubectl invoces the `kubectl` command in PATH, running the specified command.
+// Kubectl invokes the `kubectl` command in PATH, running the specified command.
 // It returns the command output and/or error.
-func Kubectl(command string) (string, error) {
+func Kubectl(command ...string) (string, error) {
 	_, err := exec.LookPath("kubectl")
 	if err != nil {
 		return "", errors.Wrap(err, "kubectl not in path")
@@ -100,11 +99,10 @@ func Kubectl(command string) (string, error) {
 		return "", err
 	}
 
-	cmd := fmt.Sprintf("kubectl " + command)
-
-	return RunProc(cmd, currentdir, false)
+	return RunProc(currentdir, false, "kubectl", command...)
 }
 
+// WaitForCommandCompletion prints progress dots until the func completes
 func WaitForCommandCompletion(ui *termui.UI, message string, funk ExternalFuncWithString) (string, error) {
 	s := ui.Progressf(" %s", message)
 	defer s.Stop()
@@ -119,7 +117,7 @@ func ExecToSuccessWithTimeout(funk ExternalFuncWithString, timeout, interval tim
 	for {
 		select {
 		case <-timeoutChan:
-			return "", errors.New(fmt.Sprintf("Timed out after %s", timeout.String()))
+			return "", errors.Errorf("Timed out after %s", timeout.String())
 		default:
 			if out, err := funk(); err != nil {
 				time.Sleep(interval)
@@ -146,33 +144,4 @@ func RunToSuccessWithTimeout(funk ExternalFunc, timeout, interval time.Duration)
 			}
 		}
 	}
-}
-
-// OpenSSLSubjectHash return the subject_hash of the given CA certificate as
-// returned by this command:
-// openssl x509 -hash -noout
-// https://www.openssl.org/docs/man1.0.2/man1/x509.html
-// TODO: The way this function is implemented, it makes a system call to openssl
-// thus making openssl a dependency. There must be a way to calculate the hash
-// in Go so we don't need openssl.
-func OpenSSLSubjectHash(cert string) (string, error) {
-	_, err := exec.LookPath("openssl")
-	if err != nil {
-		return "", errors.Wrap(err, "openssl not in path")
-	}
-
-	cmd := exec.Command("openssl", "x509", "-hash", "-noout")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return "", err
-	}
-
-	go func() {
-		defer stdin.Close()
-		io.WriteString(stdin, cert)
-	}()
-
-	out, err := cmd.CombinedOutput()
-
-	return strings.TrimSpace(string(out)), err
 }

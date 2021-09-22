@@ -8,33 +8,35 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/suse/carrier/deployments"
-	"github.com/suse/carrier/internal/interfaces"
-	"github.com/suse/carrier/kubernetes"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/internal/interfaces"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CustomService is a user defined service.
-// Implements the Service interface.
+// CustomService is a user defined service instance, also called a
+// custom service.  It implements the Service interface.
 type CustomService struct {
 	SecretName string
 	OrgName    string
 	Service    string
+	Username   string
 	kubeClient *kubernetes.Cluster
 }
 
-// CustomServiceList returns a ServiceList of all available custom Services
-func CustomServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.ServiceList, error) {
-	labelSelector := fmt.Sprintf("app.kubernetes.io/name=carrier, carrier.suse.org/organization=%s", org)
+var _ interfaces.Service = &CustomService{}
+
+// CustomServiceList returns a ServiceList of all available custom
+// Services
+func CustomServiceList(ctx context.Context, kubeClient *kubernetes.Cluster, org string) (interfaces.ServiceList, error) {
+	labelSelector := fmt.Sprintf("app.kubernetes.io/name=epinio, epinio.suse.org/namespace=%s", org)
 
 	secrets, err := kubeClient.Kubectl.CoreV1().
-		Secrets(deployments.WorkloadsDeploymentID).
-		List(context.Background(),
-			metav1.ListOptions{
-				LabelSelector: labelSelector,
-			})
+		Secrets(org).List(ctx,
+		metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
 
 	if err != nil {
 		return nil, err
@@ -43,8 +45,10 @@ func CustomServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.S
 	result := interfaces.ServiceList{}
 
 	for _, s := range secrets.Items {
-		service := s.ObjectMeta.Labels["carrier.suse.org/service"]
-		org := s.ObjectMeta.Labels["carrier.suse.org/organization"]
+		service := s.ObjectMeta.Labels["epinio.suse.org/service"]
+		org := s.ObjectMeta.Labels["epinio.suse.org/namespace"]
+		username := s.ObjectMeta.Labels["app.kubernetes.io/created-by"]
+
 		secretName := s.ObjectMeta.Name
 
 		result = append(result, &CustomService{
@@ -52,41 +56,44 @@ func CustomServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.S
 			OrgName:    org,
 			Service:    service,
 			kubeClient: kubeClient,
+			Username:   username,
 		})
 	}
 
 	return result, nil
 }
 
-// CustomServiceLookup finds a Custom Service by looking for the relevant Secret.
-func CustomServiceLookup(kubeClient *kubernetes.Cluster, org, service string) (interfaces.Service, error) {
+// CustomServiceLookup finds a Custom Service instance by looking for
+// the relevant Secret.
+func CustomServiceLookup(ctx context.Context, kubeClient *kubernetes.Cluster, org, service string) (interfaces.Service, error) {
 	secretName := serviceResourceName(org, service)
 
-	_, err := kubeClient.GetSecret(deployments.WorkloadsDeploymentID, secretName)
+	s, err := kubeClient.GetSecret(ctx, org, secretName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
-		} else {
-			return nil, err
 		}
+		return nil, err
 	}
+	username := s.ObjectMeta.Labels["app.kubernetes.io/created-by"]
 
 	return &CustomService{
 		SecretName: secretName,
 		OrgName:    org,
 		Service:    service,
 		kubeClient: kubeClient,
+		Username:   username,
 	}, nil
 }
 
-// CreateCustomService creates a new custom service from org, name and the
-// binding data.
-func CreateCustomService(kubeClient *kubernetes.Cluster, name, org string,
+// CreateCustomService creates a new custom service instance from org,
+// name, and a map of parameters.
+func CreateCustomService(ctx context.Context, kubeClient *kubernetes.Cluster, name, org, username string,
 	data map[string]string) (interfaces.Service, error) {
 
 	secretName := serviceResourceName(org, name)
 
-	_, err := kubeClient.GetSecret(deployments.WorkloadsDeploymentID, secretName)
+	_, err := kubeClient.GetSecret(ctx, org, secretName)
 	if err == nil {
 		return nil, errors.New("Service of this name already exists.")
 	}
@@ -98,13 +105,13 @@ func CreateCustomService(kubeClient *kubernetes.Cluster, name, org string,
 		sdata[k] = []byte(v)
 	}
 
-	err = kubeClient.CreateLabeledSecret("carrier-workloads",
-		secretName, sdata,
+	err = kubeClient.CreateLabeledSecret(ctx, org, secretName, sdata,
 		map[string]string{
-			"carrier.suse.org/service-type": "custom",
-			"carrier.suse.org/service":      name,
-			"carrier.suse.org/organization": org,
-			"app.kubernetes.io/name":        "carrier",
+			"epinio.suse.org/service-type": "custom",
+			"epinio.suse.org/service":      name,
+			"epinio.suse.org/namespace":    org,
+			"app.kubernetes.io/name":       "epinio",
+			"app.kubernetes.io/created-by": username,
 			// "app.kubernetes.io/version":     cmd.Version
 			// FIXME: Importing cmd causes cycle
 			// FIXME: Move version info to separate package!
@@ -121,17 +128,29 @@ func CreateCustomService(kubeClient *kubernetes.Cluster, name, org string,
 	}, nil
 }
 
+// Implement the Service interface
+
+// Name (Service interface) returns the service instance's name
 func (s *CustomService) Name() string {
 	return s.Service
 }
 
+// User (Service interface) returns the service's username
+func (s *CustomService) User() string {
+	return s.Username
+}
+
+// Org (Service interface) returns the service instance's organization
 func (s *CustomService) Org() string {
 	return s.OrgName
 }
 
-func (s *CustomService) GetBinding(appName string) (*corev1.Secret, error) {
+// GetBinding (Service interface) returns the secret representing the
+// instance's binding to the application. This is actually the
+// instance's secret itself, independent of the application.
+func (s *CustomService) GetBinding(ctx context.Context, appName string, _ string) (*corev1.Secret, error) {
 	kubeClient := s.kubeClient
-	serviceSecret, err := kubeClient.GetSecret(deployments.WorkloadsDeploymentID, s.SecretName)
+	serviceSecret, err := kubeClient.GetSecret(ctx, s.OrgName, s.SecretName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, errors.New("service does not exist")
@@ -142,27 +161,38 @@ func (s *CustomService) GetBinding(appName string) (*corev1.Secret, error) {
 	return serviceSecret, nil
 }
 
-// DeleteBinding does nothing in the case of custom services because the custom
-// service is just a secret which may be re-used later.
-func (s *CustomService) DeleteBinding(appName string) error {
+// DeleteBinding (Service interface) does nothing in the case of
+// custom service instances because they are represented by just a
+// secret which may be re-used later.
+func (s *CustomService) DeleteBinding(_ context.Context, appName, org string) error {
 	return nil
 }
 
-func (s *CustomService) Delete() error {
-	return s.kubeClient.DeleteSecret(deployments.WorkloadsDeploymentID, s.SecretName)
+// Delete (Service interface) destroys the service instance, i.e. its
+// underlying secret holding the instance's parameters
+func (s *CustomService) Delete(ctx context.Context) error {
+	return s.kubeClient.DeleteSecret(ctx, s.OrgName, s.SecretName)
 }
 
-func (s *CustomService) Status() (string, error) {
+// Status (Service interface) returns the instance's provision
+// status. As no actual provisioning had to be done it is always fully
+// provisioned.
+func (s *CustomService) Status(_ context.Context) (string, error) {
 	return "Provisioned", nil
 }
 
-func (s *CustomService) WaitForProvision() error {
+// WaitForProvision (Service interface) waits for the service instance
+// to be provisioned.  As no actual provisioning had to be done no
+// waiting is required either.
+func (s *CustomService) WaitForProvision(_ context.Context) error {
 	// Custom services provision instantly. No waiting
 	return nil
 }
 
-func (s *CustomService) Details() (map[string]string, error) {
-	serviceSecret, err := s.kubeClient.GetSecret(deployments.WorkloadsDeploymentID, s.SecretName)
+// Details (Service interface) returns the service instance's
+// configuration. I.e. the parameter data.
+func (s *CustomService) Details(ctx context.Context) (map[string]string, error) {
+	serviceSecret, err := s.kubeClient.GetSecret(ctx, s.OrgName, s.SecretName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, errors.New("service does not exist")

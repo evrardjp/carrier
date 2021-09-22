@@ -1,181 +1,655 @@
 package v1
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
+	"io/ioutil"
 	"net/http"
+	"sync"
+	"time"
 
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/helpers/kubernetes/tailer"
+	"github.com/epinio/epinio/helpers/tracelog"
+	"github.com/epinio/epinio/internal/application"
+	"github.com/epinio/epinio/internal/duration"
+	"github.com/epinio/epinio/internal/organizations"
+	"github.com/epinio/epinio/pkg/api/core/v1/models"
+	"github.com/gorilla/websocket"
 	"github.com/julienschmidt/httprouter"
-	"github.com/suse/carrier/deployments"
-	"github.com/suse/carrier/internal/application"
-	"github.com/suse/carrier/internal/cli/clients"
-	"github.com/suse/carrier/internal/duration"
-	"github.com/suse/carrier/internal/services"
-	"github.com/suse/carrier/kubernetes"
+	"github.com/pkg/errors"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
+// ApplicationsController represents all functionality of the API related to applications
 type ApplicationsController struct {
+	conn *websocket.Conn
 }
 
-func (hc ApplicationsController) Index(w http.ResponseWriter, r *http.Request) {
-	params := httprouter.ParamsFromContext(r.Context())
+// Create handles the API endpoint POST /namespaces/:org/applications
+// It creates a new and empty application. I.e. without a workload.
+func (hc ApplicationsController) Create(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
+	org := params.ByName("org")
+	username, err := GetUsername(r)
+	if err != nil {
+		return UserNotFound()
+	}
+
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return OrgIsNotKnown(org)
+	}
+
+	defer r.Body.Close()
+	bodyBytes, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	var createRequest models.ApplicationCreateRequest
+	err = json.Unmarshal(bodyBytes, &createRequest)
+	if err != nil {
+		return BadRequest(err)
+	}
+
+	appRef := models.NewAppRef(createRequest.Name, org)
+	found, err := application.Exists(ctx, cluster, appRef)
+	if err != nil {
+		return InternalError(err, "failed to check for app resource")
+	}
+	if found {
+		return AppAlreadyKnown(createRequest.Name)
+	}
+
+	err = application.Create(ctx, cluster, appRef, username)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	err = jsonResponse(w, models.ResponseOK)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	return nil
+}
+
+// Index handles the API endpoint GET /applications
+// It lists all the known applications, with and without workload.
+func (hc ApplicationsController) FullIndex(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	// naive: list namespaces, then all apps in each namespace ...
+	// can we query kube for all apps directly, across namespaces ...
+	// needs label selector, pods, and app CRD resources (workloads, and undeployed apps).
+	// the naive way seems to be much easier to implement right now.
+
+	orgList, err := organizations.List(ctx, cluster)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	var allApps models.AppList
+
+	for _, org := range orgList {
+		apps, err := application.ListApps(ctx, cluster, org.Name)
+		if err != nil {
+			return InternalError(err)
+		}
+
+		allApps = append(allApps, apps...)
+	}
+
+	js, err := json.Marshal(allApps)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(js)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	return nil
+}
+
+// Index handles the API endpoint GET /namespaces/:org/applications
+// It lists all the known applications, with and without workload.
+func (hc ApplicationsController) Index(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
 	org := params.ByName("org")
 
-	cluster, err := kubernetes.GetCluster()
-	if handleError(w, err, 500) {
-		return
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	gitea, err := clients.GetGiteaClient()
-	if handleError(w, err, 500) {
-		return
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	exists, err := gitea.OrgExists(org)
-	if handleError(w, err, 500) {
-		return
-	}
 	if !exists {
-		http.Error(w, fmt.Sprintf("Organization '%s' does not exist", org), 404)
-		return
+		return OrgIsNotKnown(org)
 	}
 
-	apps, err := application.List(cluster, gitea.Client, org)
-	if handleError(w, err, 500) {
-		return
+	apps, err := application.ListApps(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	js, err := json.Marshal(apps)
-	if handleError(w, err, 500) {
-		return
+	err = jsonResponse(w, apps)
+	if err != nil {
+		return InternalError(err)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
+
+	return nil
 }
 
-func (hc ApplicationsController) Show(w http.ResponseWriter, r *http.Request) {
-	params := httprouter.ParamsFromContext(r.Context())
+// Show handles the API endpoint GET /namespaces/:org/applications/:app
+// It returns the details of the specified application.
+func (hc ApplicationsController) Show(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
 	org := params.ByName("org")
 	appName := params.ByName("app")
 
-	cluster, err := kubernetes.GetCluster()
-	if handleError(w, err, 500) {
-		return
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	gitea, err := clients.GetGiteaClient()
-	if handleError(w, err, 500) {
-		return
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	exists, err := gitea.OrgExists(org)
-	if handleError(w, err, 500) {
-		return
-	}
 	if !exists {
-		http.Error(w, fmt.Sprintf("Organization '%s' does not exist", org), 404)
-		return
+		return OrgIsNotKnown(org)
 	}
 
-	app, err := application.Lookup(cluster, gitea.Client, org, appName)
-	if handleError(w, err, 500) {
-		return
+	exists, err = application.Exists(ctx, cluster, models.NewAppRef(appName, org))
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return AppIsNotKnown(appName)
+	}
+
+	// Application exists. It may not have a workload however.
+
+	app, err := application.Lookup(ctx, cluster, org, appName)
+	if err != nil {
+		return InternalError(err)
 	}
 	if app == nil {
-		handleError(w, errors.New("application not found"), 404)
-		return
+		// While the app exists, it has no workload.
+		// Return something barebones.
+		app = models.NewApp(appName, org)
+		app.Status = `Inactive, without workload. Launch via "epinio app push"`
 	}
 
-	js, err := json.Marshal(app)
-	if handleError(w, err, 500) {
-		return
+	err = jsonResponse(w, app)
+	if err != nil {
+		return InternalError(err)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
+
+	return nil
 }
 
-func (hc ApplicationsController) Delete(w http.ResponseWriter, r *http.Request) {
-	params := httprouter.ParamsFromContext(r.Context())
+// ServiceApps handles the API endpoint GET /namespaces/:org/serviceapps
+// It returns a map from services to the apps they are bound to, in
+// the specified org.  Internally it asks each app in the org for its
+// bound services and then inverts that map to get the desired result.
+func (hc ApplicationsController) ServiceApps(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
 	org := params.ByName("org")
-	appName := params.ByName("app")
 
-	cluster, err := kubernetes.GetCluster()
-	if handleError(w, err, 500) {
-		return
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	gitea, err := clients.GetGiteaClient()
-	if handleError(w, err, 500) {
-		return
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	exists, err := gitea.OrgExists(org)
-	if handleError(w, err, 500) {
-		return
-	}
 	if !exists {
-		http.Error(w, fmt.Sprintf("Organization '%s' does not exist", org), 404)
-		return
+		return OrgIsNotKnown(org)
 	}
 
-	app, err := application.Lookup(cluster, gitea.Client, org, appName)
-	if handleError(w, err, 500) {
-		return
-	}
-	if app == nil {
-		handleError(w, errors.New("application not found"), 404)
-		return
+	var appsOf = map[string]models.AppList{}
+
+	apps, err := application.List(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	if len(app.BoundServices) > 0 {
-		for _, bonded := range app.BoundServices {
-			bound, err := services.Lookup(cluster, org, bonded)
-			if handleError(w, err, 500) {
-				return
-			}
-
-			err = app.Unbind(bound)
-			if handleError(w, err, 500) {
-				return
+	for _, app := range apps {
+		w := application.NewWorkload(cluster, app.AppRef())
+		bound, err := w.Services(ctx)
+		if err != nil {
+			return InternalError(err)
+		}
+		for _, bonded := range bound {
+			bname := bonded.Name()
+			if theapps, found := appsOf[bname]; found {
+				appsOf[bname] = append(theapps, app)
+			} else {
+				appsOf[bname] = models.AppList{app}
 			}
 		}
 	}
 
-	err = app.Delete()
-	if handleError(w, err, 500) {
-		return
+	err = jsonResponse(w, appsOf)
+	if err != nil {
+		return InternalError(err)
 	}
 
-	// The command above removes the application's deployment.
-	// This in turn deletes the associated replicaset, and pod, in
-	// this order. The pod being gone thus indicates command
-	// completion, and is therefore what we are waiting on below.
-
-	err = cluster.WaitForPodBySelectorMissing(nil,
-		deployments.WorkloadsDeploymentID,
-		fmt.Sprintf("cloudfoundry.org/guid=%s.%s", org, appName),
-		duration.ToDeployment())
-	if handleError(w, err, 500) {
-		return
-	}
-
-	response := map[string][]string{}
-	response["UnboundServices"] = app.BoundServices
-
-	js, err := json.Marshal(response)
-	if handleError(w, err, 500) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
+	return nil
 }
 
-// Write the error to the response writer and return  true if there was an error
-func handleError(w http.ResponseWriter, err error, code int) bool {
+// Update handles the API endpoint PATCH /namespaces/:org/applications/:app
+// It modifies the specified application. Currently this is only the
+// number of instances to run.
+func (hc ApplicationsController) Update(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
+	org := params.ByName("org")
+	appName := params.ByName("app")
+
+	cluster, err := kubernetes.GetCluster(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), code)
-		return true
+		return InternalError(err)
 	}
-	return false
+
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return OrgIsNotKnown(org)
+	}
+
+	exists, err = application.Exists(ctx, cluster, models.NewAppRef(appName, org))
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return AppIsNotKnown(appName)
+	}
+
+	// Application exists. It may not have a workload however.
+
+	app, err := application.Lookup(ctx, cluster, org, appName)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if app == nil {
+		// App without workload cannot be scaled at the moment.
+		// TODO: Extend to stash the request in the app or attached resource
+		return NewAPIError("Unable to scale application without workload", "", http.StatusBadRequest)
+	}
+
+	defer r.Body.Close()
+	bodyBytes, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	var updateRequest models.UpdateAppRequest
+	err = json.Unmarshal(bodyBytes, &updateRequest)
+	if err != nil {
+		return BadRequest(err)
+	}
+
+	if updateRequest.Instances < 0 {
+		return NewBadRequest("instances param should be integer equal or greater than zero")
+	}
+
+	workload := application.NewWorkload(cluster, app.AppRef())
+	err = workload.Scale(r.Context(), updateRequest.Instances)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	err = jsonResponse(w, models.ResponseOK)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	return nil
+}
+
+// Running handles the API endpoint GET /namespaces/:org/applications/:app/running
+// It waits for the specified application to be running (i.e. its
+// deployment to be complete), before it returns. An exception is if
+// the application does not become running without
+// `duration.ToAppBuilt()` (default: 10 minutes). In that case it
+// returns with an error after that time.
+func (hc ApplicationsController) Running(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
+	org := params.ByName("org")
+	appName := params.ByName("app")
+
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return OrgIsNotKnown(org)
+	}
+
+	exists, err = application.Exists(ctx, cluster, models.NewAppRef(appName, org))
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return AppIsNotKnown(appName)
+	}
+
+	app, err := application.Lookup(ctx, cluster, org, appName)
+	if err != nil {
+		return InternalError(err)
+	}
+	if app == nil {
+		// While app exists it has no workload
+		return NewAPIError("No status available for application without workload", "", http.StatusBadRequest)
+	}
+
+	err = cluster.WaitForDeploymentCompleted(
+		ctx, nil, org, appName, duration.ToAppBuilt())
+	if err != nil {
+		return InternalError(err)
+	}
+
+	err = jsonResponse(w, models.ResponseOK)
+	if err != nil {
+		return InternalError(err)
+	}
+	return nil
+}
+
+// Logs handles the API endpoints GET /namespaces/:org/applications/:app/logs
+// and                            GET /namespaces/:org/staging/:stage_id/logs
+// It arranges for the logs of the specified application to be
+// streamed over a websocket. Dependent on the endpoint this may be
+// either regular logs, or the app's staging logs.
+func (hc ApplicationsController) Logs(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
+	org := params.ByName("org")
+	appName := params.ByName("app")
+	stageID := params.ByName("stage_id")
+	log := tracelog.Logger(ctx)
+
+	log.Info("get cluster client")
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		jsonErrorResponse(w, InternalError(err))
+		return
+	}
+
+	log.Info("validate organization", "name", org)
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		jsonErrorResponse(w, InternalError(err))
+		return
+	}
+
+	if !exists {
+		jsonErrorResponse(w, OrgIsNotKnown(org))
+		return
+	}
+
+	if appName != "" {
+		log.Info("validate application", "name", appName, "org", org)
+
+		exists, err = application.Exists(ctx, cluster, models.NewAppRef(appName, org))
+		if err != nil {
+			jsonErrorResponse(w, InternalError(err))
+			return
+		}
+
+		if !exists {
+			jsonErrorResponse(w, AppIsNotKnown(appName))
+			return
+		}
+
+		log.Info("retrieve application", "name", appName, "org", org)
+		app, err := application.Lookup(ctx, cluster, org, appName)
+		if err != nil {
+			jsonErrorResponse(w, InternalError(err))
+			return
+		}
+		if app == nil {
+			// While app exists it has no workload
+			jsonErrorResponse(w, NewAPIError("No logs available for application without workload", "", http.StatusBadRequest))
+			return
+		}
+	}
+
+	if appName == "" && stageID == "" {
+		jsonErrorResponse(w, BadRequest(errors.New("You need to specify either the stage id or the app")))
+		return
+	}
+
+	log.Info("process query")
+	queryValues := r.URL.Query()
+	followStr := queryValues.Get("follow")
+
+	log.Info("processed query", "values", queryValues)
+	log.Info("upgrade to web socket")
+
+	var upgrader = websocket.Upgrader{}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		jsonErrorResponse(w, InternalError(err))
+		return
+	}
+
+	follow := false
+	if followStr == "true" {
+		follow = true
+	}
+
+	log.Info("streaming mode", "follow", follow)
+	log.Info("streaming begin")
+
+	hc.conn = conn
+	err = hc.streamPodLogs(ctx, org, appName, stageID, cluster, follow)
+	if err != nil {
+		log.V(1).Error(err, "error occurred after upgrading the websockets connection")
+		return
+	}
+
+	log.Info("streaming completed")
+}
+
+// streamPodLogs sends the logs of any containers matching orgName, appName
+// and stageID to hc.conn (websockets) until ctx is Done or the connection is
+// closed.
+// Internally this uses two concurrent "threads" talking with each other
+// over the logChan. This is a channel of ContainerLogLine.
+// The first thread runs `application.Logs` in a go routine. It spins up a number of supporting go routines
+// that are stopped when the passed context is "Done()". The parent go routine
+// waits until all the subordinate routines are stopped. It does this by waiting on a WaitGroup.
+// When that happens the parent go routine closes the logChan. This signals
+// the main "thread" to also stop.
+// The second (and main) thread reads the logChan and sends the received log messages over to the
+// websocket connection. It returns either when the channel is closed or when the
+// connection is closed. In any case it will call the cancel func that will stop
+// all the children go routines described above and then will wait for their parent
+// go routine to stop too (using another WaitGroup).
+func (hc ApplicationsController) streamPodLogs(ctx context.Context, orgName, appName, stageID string, cluster *kubernetes.Cluster, follow bool) error {
+	logger := tracelog.NewLogger().WithName("streamer-to-websockets").V(1)
+	logChan := make(chan tailer.ContainerLogLine)
+	logCtx, logCancelFunc := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func(outerWg *sync.WaitGroup) {
+		logger.Info("create backend")
+		defer func() {
+			logger.Info("backend ends")
+		}()
+
+		var tailWg sync.WaitGroup
+		err := application.Logs(logCtx, logChan, &tailWg, cluster, follow, appName, stageID, orgName)
+		if err != nil {
+			logger.Error(err, "setting up log routines failed")
+		}
+		tailWg.Wait()  // Wait until all child routines are stopped
+		close(logChan) // Close the channel so the loop below can stop
+		outerWg.Done() // Let the outer method know we are done
+	}(&wg)
+
+	defer func() {
+		logCancelFunc() // Just in case return some error, out of the normal flow.
+		wg.Wait()
+	}()
+
+	logger.Info("stream copying begin")
+
+	// Send logs received on logChan to the websockets connection until either
+	// logChan is closed or websocket connection is closed.
+	for logLine := range logChan {
+		msg, err := json.Marshal(logLine)
+		if err != nil {
+			return err
+		}
+
+		err = hc.conn.WriteMessage(websocket.TextMessage, msg)
+		if err != nil {
+			logger.Error(err, "failed to write to websockets")
+
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				hc.conn.Close()
+				return nil
+			}
+			if websocket.IsUnexpectedCloseError(err) {
+				hc.conn.Close()
+				logger.Error(err, "websockets connection unexpectedly closed")
+				return nil
+			}
+
+			normalCloseErr := hc.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Time{})
+			if normalCloseErr != nil {
+				err = errors.Wrap(err, normalCloseErr.Error())
+			}
+
+			abnormalCloseErr := hc.conn.Close()
+			if abnormalCloseErr != nil {
+				err = errors.Wrap(err, abnormalCloseErr.Error())
+			}
+
+			return err
+		}
+	}
+
+	logger.Info("stream copying done")
+	logger.Info("websocket teardown")
+
+	if err := hc.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Time{}); err != nil {
+		return err
+	}
+
+	return hc.conn.Close()
+}
+
+// Delete handles the API endpoint DELETE /namespaces/:org/applications/:app
+// It removes the named application
+func (hc ApplicationsController) Delete(w http.ResponseWriter, r *http.Request) APIErrors {
+	ctx := r.Context()
+	params := httprouter.ParamsFromContext(ctx)
+	org := params.ByName("org")
+	appName := params.ByName("app")
+
+	cluster, err := kubernetes.GetCluster(ctx)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	exists, err := organizations.Exists(ctx, cluster, org)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	if !exists {
+		return OrgIsNotKnown(org)
+	}
+
+	appRef := models.NewAppRef(appName, org)
+	found, err := application.Exists(ctx, cluster, appRef)
+	if err != nil {
+		return InternalError(err)
+	}
+	if !found {
+		return AppIsNotKnown(appName)
+	}
+
+	app, err := application.Lookup(ctx, cluster, appRef.Org, appRef.Name)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return InternalError(err)
+	}
+
+	response := models.ApplicationDeleteResponse{}
+	if app != nil {
+		response.UnboundServices = app.BoundServices
+	}
+
+	err = application.Delete(ctx, cluster, appRef)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	err = jsonResponse(w, response)
+	if err != nil {
+		return InternalError(err)
+	}
+
+	return nil
+}
+
+// GetUsername returns the username from the header
+func GetUsername(r *http.Request) (string, error) {
+	username := r.Header.Get("X-Webauth-User")
+	if len(username) <= 0 {
+		return "", errors.New("username not found in the header")
+	}
+
+	return username, nil
 }

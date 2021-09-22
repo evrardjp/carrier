@@ -2,23 +2,19 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/suse/carrier/deployments"
-	"github.com/suse/carrier/internal/duration"
-	"github.com/suse/carrier/internal/interfaces"
-	"github.com/suse/carrier/kubernetes"
+	"github.com/epinio/epinio/helpers/kubernetes"
+	"github.com/epinio/epinio/internal/duration"
+	"github.com/epinio/epinio/internal/interfaces"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
 )
 
 // CatalogService is a Service created using Service Catalog.
@@ -29,49 +25,120 @@ type CatalogService struct {
 	Service      string
 	Class        string
 	Plan         string
-	kubeClient   *kubernetes.Cluster
+	Username     string
+	cluster      *kubernetes.Cluster
 }
 
-// ServiceClass is a service class managed by Service catalog
+var _ interfaces.Service = &CatalogService{}
+
+// ServiceClass represents a service class managed by Service catalog
 type ServiceClass struct {
 	Hash        string
 	Name        string
 	Broker      string
 	Description string
-	kubeClient  *kubernetes.Cluster
+	cluster     *kubernetes.Cluster
 }
 
 type ServiceClassList []ServiceClass
 
-// ServicePlan is a service plan managed by Service catalog
+// ServicePlan represents a service plan managed by Service catalog
 type ServicePlan struct {
-	Name        string
-	Description string
-	Free        bool
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Free        bool   `json:"free,omitempty"`
 }
 
+// ServicePlanList represents a collection of service plans
 type ServicePlanList []ServicePlan
 
-// ListPlans returns a ServicePlanList of all available catalog service plans, for the named class
-func (sc *ServiceClass) ListPlans() (ServicePlanList, error) {
-	servicePlanGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "clusterserviceplans",
-	}
+// Implement the Sort interface for service class slices
 
-	dynamicClient, err := dynamic.NewForConfig(sc.kubeClient.RestConfig)
+// Len (Sort interface) returns the length of the ServiceClassList
+func (scl ServiceClassList) Len() int {
+	return len(scl)
+}
+
+// Swap (Sort interface) exchanges the contents of specified indices
+// in the ServiceClassList
+func (scl ServiceClassList) Swap(i, j int) {
+	scl[i], scl[j] = scl[j], scl[i]
+}
+
+// Less (Sort interface) compares the contents of the specified
+// indices in the ServiceClassList and returns true if the condition
+// holds, and else false.
+func (scl ServiceClassList) Less(i, j int) bool {
+	return scl[i].Name < scl[j].Name
+}
+
+// Implement the Sort interface for service plan slices
+
+// Len (Sort interface) returns the length of the ServicePlanList
+func (spl ServicePlanList) Len() int {
+	return len(spl)
+}
+
+// Swap (Sort interface) exchanges the contents of specified indices
+// in the ServicePlanList
+func (spl ServicePlanList) Swap(i, j int) {
+	spl[i], spl[j] = spl[j], spl[i]
+}
+
+// Less (Sort interface) compares the contents of the specified
+// indices in the ServicePlanList and returns true if the condition
+// holds, and else false.
+func (spl ServicePlanList) Less(i, j int) bool {
+	return spl[i].Name < spl[j].Name
+}
+
+// LookupPlan returns the named ServicePlan, for the specified class
+func (sc *ServiceClass) LookupPlan(ctx context.Context, plan string) (*ServicePlan, error) {
+	client, err := sc.cluster.ClientServiceCatalog("clusterserviceplans")
 	if err != nil {
 		return nil, err
 	}
 
 	labelSelector := fmt.Sprintf("servicecatalog.k8s.io/spec.clusterServiceClassRef.name=%s", sc.Hash)
 
-	servicePlans, err := dynamicClient.Resource(servicePlanGVR).
-		List(context.Background(),
-			metav1.ListOptions{
-				LabelSelector: labelSelector,
-			})
+	servicePlans, err := client.List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+
+	if err != nil {
+		return nil, err
+	}
+
+	for _, servicePlan := range servicePlans.Items {
+		spec := servicePlan.Object["spec"].(map[string]interface{})
+
+		externalName := spec["externalName"].(string)
+
+		if externalName != plan {
+			continue
+		}
+
+		description := spec["description"].(string)
+		isAFreePlan := spec["free"].(bool)
+
+		return &ServicePlan{
+			Name:        externalName,
+			Description: description,
+			Free:        isAFreePlan,
+		}, nil
+	}
+
+	return nil, nil
+}
+
+// ListPlans returns a ServicePlanList of all available catalog service plans, for the named class
+func (sc *ServiceClass) ListPlans(ctx context.Context) (ServicePlanList, error) {
+	client, err := sc.cluster.ClientServiceCatalog("clusterserviceplans")
+	if err != nil {
+		return nil, err
+	}
+
+	labelSelector := fmt.Sprintf("servicecatalog.k8s.io/spec.clusterServiceClassRef.name=%s", sc.Hash)
+
+	servicePlans, err := client.List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 
 	if err != nil {
 		return nil, err
@@ -97,22 +164,13 @@ func (sc *ServiceClass) ListPlans() (ServicePlanList, error) {
 }
 
 // ListClasses returns a ServiceClassList of all available catalog service classes
-func ListClasses(kubeClient *kubernetes.Cluster) (ServiceClassList, error) {
-
-	serviceClassGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "clusterserviceclasses",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(kubeClient.RestConfig)
+func ListClasses(ctx context.Context, cluster *kubernetes.Cluster) (ServiceClassList, error) {
+	client, err := cluster.ClientServiceCatalog("clusterserviceclasses")
 	if err != nil {
 		return nil, err
 	}
 
-	serviceClasses, err := dynamicClient.Resource(serviceClassGVR).
-		List(context.Background(),
-			metav1.ListOptions{})
+	serviceClasses, err := client.List(ctx, metav1.ListOptions{})
 
 	if err != nil {
 		return nil, err
@@ -148,21 +206,16 @@ func ListClasses(kubeClient *kubernetes.Cluster) (ServiceClassList, error) {
 			Broker:      clusterServiceBrokerName,
 			Description: description,
 			Hash:        hash,
-			kubeClient:  kubeClient,
+			cluster:     cluster,
 		})
 	}
 
 	return result, nil
 }
 
-func ClassLookup(kubeClient *kubernetes.Cluster, serviceClassName string) (*ServiceClass, error) {
-	serviceClassGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "clusterserviceclasses",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(kubeClient.RestConfig)
+// ClassLookup finds the named service class
+func ClassLookup(ctx context.Context, cluster *kubernetes.Cluster, serviceClassName string) (*ServiceClass, error) {
+	client, err := cluster.ClientServiceCatalog("clusterserviceclasses")
 	if err != nil {
 		return nil, err
 	}
@@ -175,9 +228,7 @@ func ClassLookup(kubeClient *kubernetes.Cluster, serviceClassName string) (*Serv
 	// `ServiceClassMatching` (pass/client.go), just for exact
 	// match.
 
-	serviceClasses, err := dynamicClient.Resource(serviceClassGVR).
-		List(context.Background(),
-			metav1.ListOptions{})
+	serviceClasses, err := client.List(ctx, metav1.ListOptions{})
 
 	if err != nil {
 		return nil, err
@@ -205,7 +256,7 @@ func ClassLookup(kubeClient *kubernetes.Cluster, serviceClassName string) (*Serv
 			Broker:      clusterServiceBrokerName,
 			Description: description,
 			Hash:        hash,
-			kubeClient:  kubeClient,
+			cluster:     cluster,
 		}, nil
 	}
 
@@ -214,26 +265,15 @@ func ClassLookup(kubeClient *kubernetes.Cluster, serviceClassName string) (*Serv
 }
 
 // CatalogServiceList returns a ServiceList of all available catalog Services
-func CatalogServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.ServiceList, error) {
-	labelSelector := fmt.Sprintf("app.kubernetes.io/name=carrier, carrier.suse.org/organization=%s", org)
+func CatalogServiceList(ctx context.Context, cluster *kubernetes.Cluster, org string) (interfaces.ServiceList, error) {
+	labelSelector := fmt.Sprintf("app.kubernetes.io/name=epinio, epinio.suse.org/namespace=%s", org)
 
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(kubeClient.RestConfig)
+	client, err := cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return nil, err
 	}
 
-	serviceInstances, err := dynamicClient.Resource(serviceInstanceGVR).
-		Namespace(deployments.WorkloadsDeploymentID).
-		List(context.Background(),
-			metav1.ListOptions{
-				LabelSelector: labelSelector,
-			})
+	serviceInstances, err := client.Namespace(org).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 
 	if err != nil {
 		return nil, err
@@ -249,8 +289,9 @@ func CatalogServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.
 		metadata := serviceInstance.Object["metadata"].(map[string]interface{})
 		instanceName := metadata["name"].(string)
 		labels := metadata["labels"].(map[string]interface{})
-		org := labels["carrier.suse.org/organization"].(string)
-		service := labels["carrier.suse.org/service"].(string)
+		org := labels["epinio.suse.org/namespace"].(string)
+		service := labels["epinio.suse.org/service"].(string)
+		username := labels["app.kubernetes.io/created-by"].(string)
 
 		result = append(result, &CatalogService{
 			InstanceName: instanceName,
@@ -258,40 +299,37 @@ func CatalogServiceList(kubeClient *kubernetes.Cluster, org string) (interfaces.
 			Service:      service,
 			Class:        className,
 			Plan:         planName,
-			kubeClient:   kubeClient,
+			cluster:      cluster,
+			Username:     username,
 		})
 	}
 
 	return result, nil
 }
 
-func CatalogServiceLookup(kubeClient *kubernetes.Cluster, org, service string) (interfaces.Service, error) {
+// CatalogServiceLookup finds the named service
+func CatalogServiceLookup(ctx context.Context, cluster *kubernetes.Cluster, org, service string) (interfaces.Service, error) {
 	instanceName := serviceResourceName(org, service)
 
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(kubeClient.RestConfig)
+	client, err := cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return nil, err
 	}
 
-	serviceInstance, err := dynamicClient.Resource(serviceInstanceGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Get(context.Background(), instanceName, metav1.GetOptions{})
+	serviceInstance, err := client.Namespace(org).Get(ctx, instanceName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
-		} else {
-			return nil, err
 		}
+		return nil, err
 	}
 
 	spec := serviceInstance.Object["spec"].(map[string]interface{})
+	metadata := serviceInstance.Object["metadata"].(map[string]interface{})
+	labels := metadata["labels"].(map[string]interface{})
 	className := spec["clusterServiceClassExternalName"].(string)
 	planName := spec["clusterServicePlanExternalName"].(string)
+	username := labels["app.kubernetes.io/created-by"].(string)
 
 	return &CatalogService{
 		InstanceName: instanceName,
@@ -299,17 +337,16 @@ func CatalogServiceLookup(kubeClient *kubernetes.Cluster, org, service string) (
 		Service:      service,
 		Class:        className,
 		Plan:         planName,
-		kubeClient:   kubeClient,
+		cluster:      cluster,
+		Username:     username,
 	}, nil
 }
 
-func CreateCatalogService(kubeClient *kubernetes.Cluster, name, org, class, plan string, parameters map[string]string) (interfaces.Service, error) {
+// CreateCatalogService creates a new catalog-based service from org,
+// name, class, plan, and a string of parameter data (serialized json
+// map).
+func CreateCatalogService(ctx context.Context, cluster *kubernetes.Cluster, name, org, username, class, plan string, parameters string) (interfaces.Service, error) {
 	resourceName := serviceResourceName(org, name)
-
-	param, err := json.Marshal(parameters)
-	if err != nil {
-		return nil, err
-	}
 
 	data := fmt.Sprintf(`{
 		"apiVersion": "servicecatalog.k8s.io/v1beta1",
@@ -318,43 +355,35 @@ func CreateCatalogService(kubeClient *kubernetes.Cluster, name, org, class, plan
 			"name": "%s",
 			"namespace": "%s",
 			"labels": {
-				"carrier.suse.org/service-type": "catalog",
-				"carrier.suse.org/service":      "%s",
-				"carrier.suse.org/organization": "%s",
-				"app.kubernetes.io/name":        "carrier"
+				"epinio.suse.org/service-type": "catalog",
+				"epinio.suse.org/service":      "%s",
+				"epinio.suse.org/namespace":    "%s",
+				"app.kubernetes.io/name":       "epinio",
+				"app.kubernetes.io/created-by":   "%s"
 			}
 		},
 		"spec": {
 			"clusterServiceClassExternalName": "%s",
-			"clusterServicePlanExternalName": "%s" },
-		"parameters": %s
-	}`, resourceName, deployments.WorkloadsDeploymentID,
-		name, org, class, plan, param)
+			"clusterServicePlanExternalName": "%s",
+			"parameters": %s
+	  }
+	}`, resourceName, org, name, org, username, class, plan, parameters)
 
 	decoderUnstructured := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
 	obj := &unstructured.Unstructured{}
-	_, _, err = decoderUnstructured.Decode([]byte(data), nil, obj)
+	_, _, err := decoderUnstructured.Decode([]byte(data), nil, obj)
 	if err != nil {
 		return nil, err
 	}
 
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(kubeClient.RestConfig)
+	client, err := cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return nil, err
 	}
 
 	// todo validations - check service instance existence
 
-	_, err = dynamicClient.Resource(serviceInstanceGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Create(context.Background(),
-			obj,
-			metav1.CreateOptions{})
+	_, err = client.Namespace(org).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -365,68 +394,71 @@ func CreateCatalogService(kubeClient *kubernetes.Cluster, name, org, class, plan
 		Service:      name,
 		Class:        class,
 		Plan:         plan,
-		kubeClient:   kubeClient,
+		cluster:      cluster,
 	}, nil
 }
 
+// Implement the Service interface
+
+// Name (Service interface) returns the service's name
 func (s *CatalogService) Name() string {
 	return s.Service
 }
 
+// User (Service interface) returns the service's username
+func (s *CatalogService) User() string {
+	return s.Username
+}
+
+// Org (Service interface) returns the service's organization
 func (s *CatalogService) Org() string {
 	return s.OrgName
 }
 
-// GetBinding returns an application-specific secret for the service to be
-// bound to that application.
-func (s *CatalogService) GetBinding(appName string) (*corev1.Secret, error) {
+// GetBinding (Service interface) returns an application-specific
+// secret for the service to be bound to that application.
+func (s *CatalogService) GetBinding(ctx context.Context, appName, username string) (*corev1.Secret, error) {
 	// TODO Label the secret
 
 	bindingName := bindingResourceName(s.OrgName, s.Service, appName)
 
-	binding, err := s.LookupBinding(bindingName)
+	binding, err := s.lookupBinding(ctx, bindingName, s.OrgName)
 	if err != nil {
 		return nil, err
 	}
 	if binding == nil {
-		_, err = s.CreateBinding(bindingName, s.OrgName, s.Service, appName)
+		_, err = s.createBinding(ctx, bindingName, s.OrgName, username, s.Service, appName)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return s.GetBindingSecret(bindingName)
+	return s.getBindingSecret(ctx, bindingName, s.OrgName)
 }
 
-// LookupBinding finds a ServiceBinding object for the application with Name
-// appName if there is one.
-func (s *CatalogService) LookupBinding(bindingName string) (interface{}, error) {
-	serviceBindingGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "servicebindings",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
+// lookupBinding is a helper for GetBinding which finds the
+// ServiceBinding object for the application with name appName, if
+// there is one.
+func (s *CatalogService) lookupBinding(ctx context.Context, bindingName, org string) (interface{}, error) {
+	client, err := s.cluster.ClientServiceCatalog("servicebindings")
 	if err != nil {
 		return nil, err
 	}
 
-	serviceBinding, err := dynamicClient.Resource(serviceBindingGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Get(context.Background(), bindingName, metav1.GetOptions{})
+	serviceBinding, err := client.Namespace(org).Get(ctx, bindingName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
-		} else {
-			return nil, err
 		}
+		return nil, err
 	}
 
 	return serviceBinding, nil
 }
 
-// CreateBinding creates a ServiceBinding for the application with name appName.
-func (s *CatalogService) CreateBinding(bindingName, org, serviceName, appName string) (interface{}, error) {
+// createBinding is a helper for GetBinding which creates a
+// ServiceBinding for the application with name appName.
+func (s *CatalogService) createBinding(ctx context.Context, bindingName, org, username, serviceName, appName string) (interface{}, error) {
 	serviceInstanceName := serviceResourceName(org, serviceName)
 
 	data := fmt.Sprintf(`{
@@ -439,14 +471,15 @@ func (s *CatalogService) CreateBinding(bindingName, org, serviceName, appName st
 				"app.kubernetes.io/name": "%s",
 				"app.kubernetes.io/part-of": "%s",
 				"app.kubernetes.io/component": "servicebinding",
-				"app.kubernetes.io/managed-by": "carrier"
+				"app.kubernetes.io/managed-by": "epinio",
+				"app.kubernetes.io/created-by": "%s"
 			}
 		},
 		"spec": {
 			"instanceRef": { "name": "%s" },
 			"secretName": "%s" 
 		}
-	}`, bindingName, deployments.WorkloadsDeploymentID, appName, org, serviceInstanceName, bindingName)
+	}`, bindingName, org, appName, org, username, serviceInstanceName, bindingName)
 
 	decoderUnstructured := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
 	obj := &unstructured.Unstructured{}
@@ -455,25 +488,19 @@ func (s *CatalogService) CreateBinding(bindingName, org, serviceName, appName st
 		return nil, err
 	}
 
-	serviceBindingGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "servicebindings",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
+	client, err := s.cluster.ClientServiceCatalog("servicebindings")
 	if err != nil {
 		return nil, err
 	}
 
-	serviceBinding, err := dynamicClient.Resource(serviceBindingGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Create(context.Background(), obj, metav1.CreateOptions{})
+	serviceBinding, err := client.Namespace(org).
+		Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	// Update the binding secret with kubernetes app labels
-	secret, err := s.GetBindingSecret(bindingName)
+	secret, err := s.getBindingSecret(ctx, bindingName, org)
 	if err != nil {
 		return nil, err
 	}
@@ -485,10 +512,11 @@ func (s *CatalogService) CreateBinding(bindingName, org, serviceName, appName st
 	labels["app.kubernetes.io/name"] = appName
 	labels["app.kubernetes.io/part-of"] = org
 	labels["app.kubernetes.io/component"] = "servicebindingsecret"
-	labels["app.kubernetes.io/managed-by"] = "carrier"
+	labels["app.kubernetes.io/managed-by"] = "epinio"
+	labels["app.kubernetes.io/created-by"] = username
 	secret.SetLabels(labels)
 
-	_, err = s.kubeClient.Kubectl.CoreV1().Secrets(deployments.WorkloadsDeploymentID).Update(context.Background(), secret, metav1.UpdateOptions{})
+	_, err = s.cluster.Kubectl.CoreV1().Secrets(org).Update(ctx, secret, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -496,69 +524,50 @@ func (s *CatalogService) CreateBinding(bindingName, org, serviceName, appName st
 	return serviceBinding, nil
 }
 
-// GetBindingSecret returns the Secret that represents the binding of a Service
-// to an Application.
-func (s *CatalogService) GetBindingSecret(bindingName string) (*corev1.Secret, error) {
-	return s.kubeClient.WaitForSecret(deployments.WorkloadsDeploymentID, bindingName,
-		duration.ToServiceSecret())
+// getBindingSecret is helper which returns the Secret that represents
+// the binding of a Service to an Application.
+func (s *CatalogService) getBindingSecret(ctx context.Context, bindingName, org string) (*corev1.Secret, error) {
+	return s.cluster.WaitForSecret(ctx, org, bindingName, duration.ToServiceSecret())
 }
 
-// DeleteBinding deletes the ServiceBinding resource. The relevant secret will
-// also be deleted automatically.
-func (s *CatalogService) DeleteBinding(appName string) error {
+// DeleteBinding (Service interface) deletes the ServiceBinding
+// resource. The relevant secret will also be deleted automatically.
+func (s *CatalogService) DeleteBinding(ctx context.Context, appName, org string) error {
+	client, err := s.cluster.ClientServiceCatalog("servicebindings")
+	if err != nil {
+		return err
+	}
+
 	bindingName := bindingResourceName(s.OrgName, s.Service, appName)
 
-	serviceBindingGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "servicebindings",
-	}
+	return client.Namespace(org).Delete(ctx, bindingName, metav1.DeleteOptions{})
+}
 
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
+// Delete (Service interface) destroys the service instance, i.e. the
+// underlying kube service instance resource
+func (s *CatalogService) Delete(ctx context.Context) error {
+	client, err := s.cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return err
 	}
 
-	return dynamicClient.Resource(serviceBindingGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Delete(context.Background(), bindingName, metav1.DeleteOptions{})
+	return client.Namespace(s.OrgName).Delete(ctx, s.InstanceName, metav1.DeleteOptions{})
 }
 
-func (s *CatalogService) Delete() error {
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
-	if err != nil {
-		return err
-	}
-
-	return dynamicClient.Resource(serviceInstanceGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Delete(context.Background(), s.InstanceName, metav1.DeleteOptions{})
-}
-
-func (s *CatalogService) Status() (string, error) {
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
+// Status (Service interface) returns the service provision status. It
+// queries the underlying service instance resource for this
+func (s *CatalogService) Status(ctx context.Context) (string, error) {
+	client, err := s.cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return "", err
 	}
 
-	serviceInstance, err := dynamicClient.Resource(serviceInstanceGVR).Namespace(deployments.WorkloadsDeploymentID).
-		Get(context.Background(), s.InstanceName, metav1.GetOptions{})
+	serviceInstance, err := client.Namespace(s.OrgName).Get(ctx, s.InstanceName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return "Not Found", nil
-		} else {
-			return "", err
 		}
+		return "", err
 	}
 
 	status := serviceInstance.Object["status"].(map[string]interface{})
@@ -567,22 +576,18 @@ func (s *CatalogService) Status() (string, error) {
 	return provisioned, nil
 }
 
-func (s *CatalogService) WaitForProvision() error {
-	serviceInstanceGVR := schema.GroupVersionResource{
-		Group:    "servicecatalog.k8s.io",
-		Version:  "v1beta1",
-		Resource: "serviceinstances",
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(s.kubeClient.RestConfig)
+// WaitForProvision (Service interface) waits for the service instance
+// to be provisioned.
+func (s *CatalogService) WaitForProvision(ctx context.Context) error {
+	client, err := s.cluster.ClientServiceCatalog("serviceinstances")
 	if err != nil {
 		return err
 	}
 
-	namespace := dynamicClient.Resource(serviceInstanceGVR).Namespace(deployments.WorkloadsDeploymentID)
+	namespace := client.Namespace(s.OrgName)
 
 	return wait.PollImmediate(time.Second, duration.ToServiceProvision(), func() (bool, error) {
-		serviceInstance, err := namespace.Get(context.Background(), s.InstanceName, metav1.GetOptions{})
+		serviceInstance, err := namespace.Get(ctx, s.InstanceName, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return false, errors.New("Not Found")
@@ -604,7 +609,9 @@ func (s *CatalogService) WaitForProvision() error {
 	})
 }
 
-func (s *CatalogService) Details() (map[string]string, error) {
+// Details (Service interface) returns the service configuration,
+// i.e. class and plan.
+func (s *CatalogService) Details(_ context.Context) (map[string]string, error) {
 	details := map[string]string{}
 
 	details["Class"] = s.Class
