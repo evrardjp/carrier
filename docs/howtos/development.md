@@ -2,6 +2,24 @@
 
 ## Local development environment
 
+An Epinio installation consists of various components which are usually deployed
+using the [official Epinio helm chart](https://github.com/epinio/helm-charts/tree/main/chart/epinio).
+For convenience and in order to be able to point to a specific commit of the helm-chart
+repository, one that works with the current commit in the `epinio/epinio` repository,
+the helm-chart repository is a git submodule in the `epinio/epinio` one.
+
+In order to work on the Epinio code, Epinio needs to be installed using the
+helm-chart in the submodule, the binary needs to be compiled from source and
+then the epinio-server deployment that runs in the cluster needs to be updated to
+run the newly compiled binary. The binary is both the epinio API server and the
+Epinio cli used to interact with the API server.
+
+There are various `make` targets that help prepare a development environment.
+They are described in order below.
+
+NOTE: Most scripts assume they run on a Linux OS. They may have to be adapted in
+      order to work on another OS.
+
 ### Get a cluster
 
 There are many options on how to get a local cluster for development. Here are a few:
@@ -11,65 +29,61 @@ There are many options on how to get a local cluster for development. Here are a
 - [kind](https://github.com/kubernetes-sigs/kind)
 - [minikube](https://minikube.sigs.k8s.io/docs/start/)
 
-Assuming you have `k3d` installed, you can create a cluster with this command:
+Assuming you have `k3d` installed, you can create a cluster with this `make` target :
 
 ```
-k3d cluster create epinio
+make acceptance-cluster-setup
 ```
 
-This command should automatically update your default kubeconfig to point to
-the new cluster but if you need to save your kubeconfig manually you can do it with:
+(as the name also implies, this target is also used to prepare a cluster for the acceptance test suite in CI)
+
+This command writes the kubeconfig file to talk to the cluster in `tmp/acceptance-kubeconfig`.
+For the following steps to work, `KUBECONFIG` needs to be exported as so:
+
 
 ```
-k3d kubeconfig get epinio > epinio_kubeconfig
+export KUBECONFIG=$PWD/tmp/acceptance-kubeconfig
 ```
 
-### Build Epinio
-
-You can build Epinio with the following make target:
-
-```
-make build
-```
-
-This is building Epinio for linux on amd64 architecture. If you are on a
-different OS or architecture you can use one of other the available `build-*` targets.
-Look at the Makefile at the root of the project to see what is available.
-
-### Installing Epinio
-
-While we have a [dedicated document](https://docs.epinio.io/installation/installation.html) for cluster
-specific instructions, the following should generally be sufficient to get you running:
+Alternatively, the following command will merge the current context in the current
+configuration and make it the default context (don't set the `KUBECONFIG`
+variable with the above command if you want to update the default configuration).
+This way, the `KUBECONFIG` variable won't have to be exported in every virtual terminal.
 
 ```
-make install
-./dist/epinio-linux-amd64 namespace create workspace
-./dist/epinio-linux-amd64 target workspace
+k3d kubeconfig merge -d epinio-acceptance
 ```
 
-In case you're curious why `make install` is used here instead of
-`epinio install`, we have a section to look
-[Behind the curtains](#curtain) at the end of the document, which
-explains the details of running an Epinio dev environment.
+### Install cert-manager
 
-After making changes to the binary simply invoking `make
-patch-epinio-deployment` again will upload the changes into the
-running cluster.
+[Cert Manager](https://cert-manager.io/) is an external dependency of Epinio and
+is not installed by the official helm-chart. There is a `make` target that will
+install cert-manager on the cluster to be used by the Epinio installation later:
 
-Another thing `epinio install` does after deploying all components is
-the creation and targeting of a standard namespace, `workspace`.
+```
+make install-cert-manager
+```
 
-With the failing server component these actions will fail, making the
-installation fail. Using the option `--skip-default-namespace` instructs the
-command to forego these actions. Which in turn makes it necessary to
-run them manually to reach the standard state of a cluster. These are
-the last two commands in the above script.
+### Install Epinio
 
-The one post-deployment action performed by `install` not affected by
-all of the above is the automatic `config update` saving
-API credentials and certs into the client configuration file. As that
-command talks directly to the cluster and not the epinio API the
-failing server component does not matter.
+The following make target will use the helm-chart from the git submodule directory,
+to install Epinio on the cluster:
+
+```
+make prepare_environment_k3d
+```
+
+### Run the current development build
+
+Every time a change is made in the Epinio source code, the binary running inside
+the epinio-server Pod has to be replaced with a freshly compiled one. This can
+be achieved by running the following command:
+
+```
+make && make patch-epinio-deployment
+```
+
+This first compiles a new binary locally and then replaces the one running inside the Pod with it.
 
 If the cluster is not running on linux-amd64 it will be necessary to set
 `EPINIO_BINARY_PATH` to the correct binary to place into the epinio server
@@ -108,56 +122,3 @@ Lastly, do not forget to set up a proper domain so that the client can talk to
 the server after installation is done. While during installation only a suitable
 `KUBECONFIG` is required after the client will go and use the information from
 the ingress, and that then has to properly resolve in the DNS.
-
-<a id='curtain'>
-#### Behind the curtains
-
-`make install` does quite a bit more than the plain
-
-```
-epinio install
-```
-
-found in the quick install intructions.
-
-Let's look at what `make install` actually does:
-
-When building Epinio, the generated binary assumes that there is a
-container image for the Epinio server components, with a tag that
-matches the commit you built from.  For example, when calling `make
-build` on commit `7bfb700`, the version reported by Epinio is
-something like `v0.0.5-75-g7bfb700` and an image `epinio/server:v0.0.5-75-g7bfb700`
-is expected to be found.
-
-This works fine for released versions, because the release pipeline ensures
-that such an image is built and published.
-
-However when building locally building and publishing an image for
-every little change is ... inconvenient.
-
-`make install` is setting
-```
-export EPINIO_DONT_WAIT_FOR_DEPLOYMENT=1
-```
-
-before calling the `epinio` binary that was created during `make build`.
-
-This tells the `epinio install` command to not wait for the Epinio server
-deployment. Since that will be failing without the image. Inspecting
-the cluster with
-
-```
-kubectl get pod -n epinio --selector=app.kubernetes.io/name=epinio-server
-```
-
-will confirm this.
-
-Then `make install` runs `scripts/patch-epinio-deployment.sh` which compensates for this
-issue. This make target patches the failing Epinio server deployment
-to use an existing image from some release and then copies the locally
-built `dist/epinio-linux-amd64` binary into it, ensuring that it runs
-the same binary as the client.
-
-__Note__ When building for another OS or architecture the
-`dist/epinio-linux-amd64` binary will not exist, and the script has to
-be adjusted accordingly.

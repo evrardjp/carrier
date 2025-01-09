@@ -1,26 +1,37 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package apps_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/epinio/epinio/acceptance/helpers/catalog"
-	"github.com/epinio/epinio/helpers"
-	"github.com/epinio/epinio/internal/names"
+	"github.com/epinio/epinio/acceptance/helpers/proc"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 )
 
 type WordpressApp struct {
 	Name      string
-	Org       string
+	Namespace string
 	Dir       string
 	SourceURL string
 }
@@ -28,10 +39,10 @@ type WordpressApp struct {
 // CreateDir sets up a directory for a Wordpress application
 func (w *WordpressApp) CreateDir() error {
 	var err error
-	if w.Dir, err = ioutil.TempDir("", "epinio-acceptance"); err != nil {
+	if w.Dir, err = os.MkdirTemp("", "epinio-acceptance"); err != nil {
 		return err
 	}
-	if out, err := helpers.RunProc(w.Dir, false, "wget", w.SourceURL); err != nil {
+	if out, err := proc.Run(w.Dir, false, "wget", w.SourceURL); err != nil {
 		return errors.Wrap(err, out)
 	}
 
@@ -40,30 +51,14 @@ func (w *WordpressApp) CreateDir() error {
 		return err
 	}
 
-	fmt.Printf("tarPaths := %v\n", tarPaths)
-
-	if out, err := helpers.RunProc(w.Dir, false, "tar", append([]string{"xvf"}, tarPaths...)...); err != nil {
-		return errors.Wrap(err, out)
-	}
-	if out, err := helpers.RunProc(w.Dir, false, "mv", "wordpress", "htdocs"); err != nil {
+	if out, err := proc.Run(w.Dir, false, "tar", append([]string{"xvf"}, tarPaths...)...); err != nil {
 		return errors.Wrap(err, out)
 	}
 
-	if out, err := helpers.RunProc("", false, "rm", tarPaths...); err != nil {
+	if out, err := proc.Run("", false, "rm", tarPaths...); err != nil {
 		return errors.Wrap(err, out)
 	}
 
-	buildpackYaml := []byte(`
----
-php:
-  version: 7.3.x
-  script: index.php
-  webserver: nginx
-  webdirectory: htdocs
-`)
-	if err := ioutil.WriteFile(path.Join(w.Dir, "buildpack.yml"), buildpackYaml, 0644); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(path.Join(w.Dir, ".php.ini.d"), 0755); err != nil {
 		return err
 	}
@@ -72,38 +67,43 @@ php:
 extension=zlib
 extension=mysqli
 `)
-	if err := ioutil.WriteFile(path.Join(w.Dir, ".php.ini.d", "extensions.ini"), phpIni, 0755); err != nil {
+	if err := os.WriteFile(path.Join(w.Dir, ".php.ini.d", "extensions.ini"), phpIni, 0755); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// Uri Finds the application ingress and returns the url to the app.
+// AppURL Finds the application ingress and returns the url to the app.
+// If more than one route is specified for the app, it will return the first
+// one alphabetically.
 func (w *WordpressApp) AppURL() (string, error) {
-	host, err := helpers.Kubectl("get", "ingress",
-		"--namespace", w.Org,
-		"--field-selector", "metadata.name="+names.IngressName(w.Name),
-		"-o", "jsonpath={.items[0].spec['rules'][0]['host']}")
+	out, err := proc.Kubectl("get", "ingress",
+		"--namespace", w.Namespace,
+		"--selector", "app.kubernetes.io/name="+w.Name,
+		"-o", "jsonpath={.items[*].spec.rules[*].host}")
 	if err != nil {
 		return "", err
 	}
+	hosts := strings.Split(out, " ")
+	sort.Strings(hosts)
 
-	return fmt.Sprintf("https://%s", host), nil
+	return fmt.Sprintf("https://%s", hosts[0]), nil
 }
 
 var _ = Describe("Wordpress", func() {
+	var namespace string
 	var wordpress WordpressApp
 
 	BeforeEach(func() {
-		org := catalog.NewOrgName()
+		namespace = catalog.NewNamespaceName()
 		wordpress = WordpressApp{
 			SourceURL: "https://wordpress.org/wordpress-5.6.1.tar.gz",
 			Name:      catalog.NewAppName(),
-			Org:       org,
+			Namespace: namespace,
 		}
 
-		env.SetupAndTargetOrg(org)
+		env.SetupAndTargetNamespace(namespace)
 
 		err := wordpress.CreateDir()
 		Expect(err).ToNot(HaveOccurred())
@@ -115,10 +115,15 @@ var _ = Describe("Wordpress", func() {
 
 		err = os.RemoveAll(wordpress.Dir)
 		Expect(err).ToNot(HaveOccurred())
+		env.DeleteNamespace(namespace)
 	})
 
 	It("can deploy Wordpress", func() {
-		out, err := env.Epinio(wordpress.Dir, "apps", "push", wordpress.Name)
+		out, err := env.EpinioPush(wordpress.Dir, wordpress.Name, "--name", wordpress.Name,
+			"--builder-image", "paketobuildpacks/builder:0.2.443-full",
+			"-e", "BP_PHP_WEB_DIR=wordpress",
+			"-e", "BP_PHP_VERSION=8.0.x",
+			"-e", "BP_PHP_SERVER=nginx")
 		Expect(err).ToNot(HaveOccurred(), out)
 
 		out, err = env.Epinio("", "app", "list")

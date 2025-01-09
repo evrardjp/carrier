@@ -1,0 +1,42 @@
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: application.epinio.io/v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: epinio
+    meta.helm.sh/release-namespace: epinio
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: myname
+  namespace: epinio
+spec:
+  chart: postgresql
+  description: |
+    This service is going to deploy a simple default Bitnami PostreSQL db instance.
+    You can find more info at https://github.com/bitnami/charts/tree/master/bitnami/postgresql/.
+    This database is running inside the cluster so it's probably not a good choice for production
+    environments, at least with this default configuration.
+  helmRepo:
+    name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  name: myname
+  shortDescription: A PostgreSQL service that can be used during development
+  values: |-
+    global:
+      postgresql:
+        auth:
+          database: production
+          username: myuser
+          password: mypassword
+    volumePermissions:
+      enabled: true

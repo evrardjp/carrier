@@ -1,27 +1,39 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cli
 
 import (
-	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
-	"path"
+	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
+	"time"
 
-	"github.com/epinio/epinio/deployments"
-	"github.com/epinio/epinio/helpers/termui"
 	"github.com/epinio/epinio/helpers/tracelog"
-	apiv1 "github.com/epinio/epinio/internal/api/v1"
-	"github.com/epinio/epinio/internal/filesystem"
-	"github.com/epinio/epinio/internal/web"
-	"github.com/go-logr/logr"
-	"github.com/julienschmidt/httprouter"
+	"github.com/epinio/epinio/internal/cli/server"
+	"github.com/epinio/epinio/internal/cli/termui"
+	"github.com/epinio/epinio/internal/upgraderesponder"
+	"github.com/epinio/epinio/internal/version"
+	"github.com/gin-gonic/gin"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/rest"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -29,17 +41,113 @@ import (
 
 func init() {
 	flags := CmdServer.Flags()
+
+	flags.StringP("namespace", "n", "epinio", "(NAMESPACE) The namespace to use")
+	err := viper.BindPFlag("namespace", flags.Lookup("namespace"))
+	checkErr(err)
+	err = viper.BindEnv("namespace", "NAMESPACE")
+	checkErr(err)
+
 	flags.Int("port", 0, "(PORT) The port to listen on. Leave empty to auto-assign a random port")
-	viper.BindPFlag("port", flags.Lookup("port"))
-	viper.BindEnv("port", "PORT")
+	err = viper.BindPFlag("port", flags.Lookup("port"))
+	checkErr(err)
+	err = viper.BindEnv("port", "PORT")
+	checkErr(err)
 
-	flags.String("tls-issuer", deployments.EpinioCAIssuer, "(TLS_ISSUER) The cluster issuer to use for workload certificates")
-	viper.BindPFlag("tls-issuer", flags.Lookup("tls-issuer"))
-	viper.BindEnv("tls-issuer", "TLS_ISSUER")
+	flags.String("tls-issuer", "", "(TLS_ISSUER) The cluster issuer to use for workload certificates")
+	err = viper.BindPFlag("tls-issuer", flags.Lookup("tls-issuer"))
+	checkErr(err)
+	err = viper.BindEnv("tls-issuer", "TLS_ISSUER")
+	checkErr(err)
 
-	flags.Bool("use-internal-registry-node-port", true, "(USE_INTERNAL_REGISTRY_NODE_PORT) Use the internal registry via a node port")
-	viper.BindPFlag("use-internal-registry-node-port", flags.Lookup("use-internal-registry-node-port"))
-	viper.BindEnv("use-internal-registry-node-port", "USE_INTERNAL_REGISTRY_NODE_PORT")
+	flags.String("access-control-allow-origin", "", "(ACCESS_CONTROL_ALLOW_ORIGIN) Domains allowed to use the API")
+	err = viper.BindPFlag("access-control-allow-origin", flags.Lookup("access-control-allow-origin"))
+	checkErr(err)
+	err = viper.BindEnv("access-control-allow-origin", "ACCESS_CONTROL_ALLOW_ORIGIN")
+	checkErr(err)
+
+	flags.String("registry-certificate-secret", "", "(REGISTRY_CERTIFICATE_SECRET) Secret for the registry's TLS certificate")
+	err = viper.BindPFlag("registry-certificate-secret", flags.Lookup("registry-certificate-secret"))
+	checkErr(err)
+	err = viper.BindEnv("registry-certificate-secret", "REGISTRY_CERTIFICATE_SECRET")
+	checkErr(err)
+
+	flags.String("s3-certificate-secret", "", "(S3_CERTIFICATE_SECRET) Secret for the S3 endpoint TLS certificate. Can be left empty if S3 is served with a trusted certificate.")
+	err = viper.BindPFlag("s3-certificate-secret", flags.Lookup("s3-certificate-secret"))
+	checkErr(err)
+	err = viper.BindEnv("s3-certificate-secret", "S3_CERTIFICATE_SECRET")
+	checkErr(err)
+
+	flags.String("ingress-class-name", "", "(INGRESS_CLASS_NAME) Name of the ingress class to use for apps. Leave empty to add no ingressClassName to the ingress.")
+	err = viper.BindPFlag("ingress-class-name", flags.Lookup("ingress-class-name"))
+	checkErr(err)
+	err = viper.BindEnv("ingress-class-name", "INGRESS_CLASS_NAME")
+	checkErr(err)
+
+	flags.String("app-image-exporter", "", "(APP_IMAGE_EXPORTER) Name of the container image used to download the application image from the 'export' API.")
+	err = viper.BindPFlag("app-image-exporter", flags.Lookup("app-image-exporter"))
+	checkErr(err)
+	err = viper.BindEnv("app-image-exporter", "APP_IMAGE_EXPORTER")
+	checkErr(err)
+
+	flags.String("default-builder-image", "", "(DEFAULT_BUILDER_IMAGE) Name of the container image used to build images from staged sources.")
+	err = viper.BindPFlag("default-builder-image", flags.Lookup("default-builder-image"))
+	checkErr(err)
+	err = viper.BindEnv("default-builder-image", "DEFAULT_BUILDER_IMAGE")
+	checkErr(err)
+
+	flags.Bool("disable-tracking", false, "(DISABLE_TRACKING) Disable tracking of the running Epinio and Kubernetes versions")
+	err = viper.BindPFlag("disable-tracking", flags.Lookup("disable-tracking"))
+	checkErr(err)
+	err = viper.BindEnv("disable-tracking", "DISABLE_TRACKING")
+	checkErr(err)
+
+	flags.String("staging-service-account-name", "", "(STAGING_SERVICE_ACCOUNT_NAME)")
+	err = viper.BindPFlag("staging-service-account-name", flags.Lookup("staging-service-account-name"))
+	checkErr(err)
+	err = viper.BindEnv("staging-service-account-name", "STAGING_SERVICE_ACCOUNT_NAME")
+	checkErr(err)
+
+	flags.String("staging-resource-cpu", "", "(STAGING_RESOURCE_CPU)")
+	err = viper.BindPFlag("staging-resource-cpu", flags.Lookup("staging-resource-cpu"))
+	checkErr(err)
+	err = viper.BindEnv("staging-resource-cpu", "STAGING_RESOURCE_CPU")
+	checkErr(err)
+
+	flags.String("staging-resource-memory", "", "(STAGING_RESOURCE_MEMORY)")
+	err = viper.BindPFlag("staging-resource-memory", flags.Lookup("staging-resource-memory"))
+	checkErr(err)
+	err = viper.BindEnv("staging-resource-memory", "STAGING_RESOURCE_MEMORY")
+	checkErr(err)
+
+	flags.String("staging-resource-disk", "", "(STAGING_RESOURCE_DISK)")
+	err = viper.BindPFlag("staging-resource-disk", flags.Lookup("staging-resource-disk"))
+	checkErr(err)
+	err = viper.BindEnv("staging-resource-disk", "STAGING_RESOURCE_DISK")
+	checkErr(err)
+
+	flags.String("upgrade-responder-address", upgraderesponder.UpgradeResponderAddress, "(UPGRADE_RESPONDER_ADDRESS) Disable tracking of the running Epinio and Kubernetes versions")
+	err = viper.BindPFlag("upgrade-responder-address", flags.Lookup("upgrade-responder-address"))
+	checkErr(err)
+	err = viper.BindEnv("upgrade-responder-address", "UPGRADE_RESPONDER_ADDRESS")
+	checkErr(err)
+
+	flags.Float32("kube-api-qps", rest.DefaultQPS, "(KUBE_API_QPS) The QPS indicates the maximum QPS of the Kubernetes client.")
+	err = viper.BindPFlag("kube-api-qps", flags.Lookup("kube-api-qps"))
+	checkErr(err)
+	err = viper.BindEnv("kube-api-qps", "KUBE_API_QPS")
+	checkErr(err)
+
+	flags.Int("kube-api-burst", rest.DefaultBurst, "(KUBE_API_BURST) Maximum burst for throttle of the Kubernetes client.")
+	err = viper.BindPFlag("kube-api-burst", flags.Lookup("kube-api-burst"))
+	checkErr(err)
+	err = viper.BindEnv("kube-api-burst", "KUBE_API_BURST")
+	checkErr(err)
+
+	version.ChartVersion = os.Getenv("CHART_VERSION")
+	if !strings.HasPrefix(version.ChartVersion, "v") {
+		version.ChartVersion = "v" + version.ChartVersion
+	}
 }
 
 // CmdServer implements the command: epinio server
@@ -49,123 +157,103 @@ var CmdServer = &cobra.Command{
 	Long:  "This command starts the Epinio server. `epinio install` ensures the server is running inside your cluster. Normally you don't need to run this command manually.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		httpServerWg := &sync.WaitGroup{}
-		httpServerWg.Add(1)
-		port := viper.GetInt("port")
-		ui := termui.NewUI()
 		logger := tracelog.NewLogger().WithName("EpinioServer")
-		_, listeningPort, err := startEpinioServer(httpServerWg, port, ui, logger)
-		if err != nil {
-			return errors.Wrap(err, "failed to start server")
-		}
-		ui.Normal().Msg("listening on localhost on port " + listeningPort)
-		httpServerWg.Wait()
 
-		return nil
+		// Validate resource requests for staging job here, on server startup, to reject bad values immediately.
+
+		cpuRequest := viper.GetString("staging-resource-cpu")
+		if cpuRequest != "" {
+			_, err := resource.ParseQuantity(cpuRequest)
+			if err != nil {
+				return errors.Wrap(err, "bad cpu request for staging job")
+			}
+		}
+		memoryRequest := viper.GetString("staging-resource-memory")
+		if memoryRequest != "" {
+			_, err := resource.ParseQuantity(memoryRequest)
+			if err != nil {
+				return errors.Wrap(err, "bad memory request for staging job")
+			}
+		}
+		diskRequest := viper.GetString("staging-resource-disk")
+		if diskRequest != "" {
+			_, err := resource.ParseQuantity(diskRequest)
+			if err != nil {
+				return errors.Wrap(err, "bad disk size request for staging job")
+			}
+		}
+
+		handler, err := server.NewHandler(logger)
+		if err != nil {
+			return errors.Wrap(err, "error creating handler")
+		}
+
+		port := viper.GetInt("port")
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			return errors.Wrap(err, "error creating listener")
+		}
+
+		ui := termui.NewUI()
+		ui.Normal().Msg("Epinio version: " + version.Version)
+		listeningPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+		ui.Normal().Msg("listening on localhost on port " + listeningPort)
+
+		trackingDisabled := viper.GetBool("disable-tracking")
+		upgradeResponderAddress := viper.GetString("upgrade-responder-address")
+		logger.Info("Checking upgrade-responder tracking", "disabled", trackingDisabled, "upgradeResponderAddress", upgradeResponderAddress)
+
+		if !trackingDisabled {
+			checker, err := upgraderesponder.NewChecker(context.Background(), logger, upgradeResponderAddress)
+			if err != nil {
+				return errors.Wrap(err, "error creating listener")
+			}
+
+			checker.Start()
+			defer checker.Stop()
+		}
+
+		return startServerGracefully(listener, handler)
 	},
 }
 
-// startEpinioServer is a helper which initializes and start the API server
-func startEpinioServer(wg *sync.WaitGroup, port int, _ *termui.UI, logger logr.Logger) (*http.Server, string, error) {
-	listener, err := net.Listen("tcp", "0.0.0.0:"+strconv.Itoa(port))
-	if err != nil {
-		return nil, "", err
+// startServerGracefully will start the server and will wait for a graceful shutdown
+func startServerGracefully(listener net.Listener, handler http.Handler) error {
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // Prevent Slowloris attack
 	}
 
-	elements := strings.Split(listener.Addr().String(), ":")
-	listeningPort := elements[len(elements)-1]
+	quit := make(chan os.Signal, 1)
 
-	http.Handle("/api/v1/", loggingHandler(apiv1.Router(), logger))
-	http.Handle("/ready", ReadyRouter())
-	http.Handle("/", loggingHandler(web.Router(), logger))
-	// Static files
-	var assetsDir http.FileSystem
-	if os.Getenv("LOCAL_FILESYSTEM") == "true" {
-		assetsDir = http.Dir(path.Join(".", "assets", "embedded-web-files", "assets"))
-	} else {
-		assetsDir = filesystem.Assets()
+	// in coverage mode we need to be able to terminate the server to collect the report
+	if _, ok := os.LookupEnv("GOCOVERDIR"); ok {
+		router := handler.(*gin.Engine)
+		router.GET("/exit", func(c *gin.Context) {
+			c.AbortWithStatus(http.StatusNoContent)
+			quit <- syscall.SIGTERM
+		})
 	}
-	http.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(assetsDir)))
-	srv := &http.Server{Handler: nil}
+
 	go func() {
-		defer wg.Done() // let caller know we are done cleaning up
-
-		// always returns error. ErrServerClosed on graceful close
-		if err := srv.Serve(listener); err != http.ErrServerClosed {
-			log.Fatalf("Epinio server failed to start: %v", err)
+		if err := srv.Serve(listener); err != nil && errors.Is(err, http.ErrServerClosed) {
+			log.Printf("listen: %s\n", err)
 		}
 	}()
 
-	return srv, listeningPort, nil
-}
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-// ReadyRouter constructs and returns the router for the endpoint
-// handling the kube probes (liveness, readiness)
-func ReadyRouter() *httprouter.Router {
-	router := httprouter.New()
-	router.HandlerFunc("GET", "/ready", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	})
-	return router
-}
+	log.Println("Shutting down server...")
 
-// loggingHandler is the logging middleware for requests
-func loggingHandler(h http.Handler, logger logr.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := fmt.Sprintf("%d", rand.Intn(10000)) // nolint:gosec // Non-crypto use
-		log := logger.WithName(id).WithValues(
-			"method", r.Method,
-			"uri", r.URL.String(),
-			"user", r.Header.Get("X-Webauth-User"),
-		)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		// add our logger
-		ctx := r.Context()
-		ctx = tracelog.WithLogger(ctx, log)
-		r = r.WithContext(ctx)
-
-		// log the request first, then ...
-		logRequest(r, log)
-
-		// ... call the original http.Handler
-		h.ServeHTTP(w, r)
-
-		if log.V(15).Enabled() {
-			log = log.WithValues("header", w.Header())
-		}
-		log.V(5).Info("response written")
-	})
-}
-
-// logRequest is the logging backend for requests
-func logRequest(r *http.Request, log logr.Logger) {
-	if log.V(15).Enabled() {
-		log = log.WithValues(
-			"header", r.Header,
-			"params", r.Form,
-		)
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+		return err
 	}
 
-	// Read request body for logging
-	bodyBytes, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		log.Error(err, "request failed", "body", "error")
-		return
-	}
-	r.Body.Close()
-
-	// Recreate body for the actual handler
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	// log body only at higher trace levels
-	b := "n/a"
-	if len(bodyBytes) != 0 {
-		b = string(bodyBytes)
-	}
-	if log.V(15).Enabled() {
-		log = log.WithValues("body", b)
-	}
-
-	log.V(1).Info("request received", "bodylen", len(bodyBytes))
+	log.Println("Server exiting")
+	return nil
 }

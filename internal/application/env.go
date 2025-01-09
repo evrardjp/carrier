@@ -1,3 +1,14 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package application
 
 import (
@@ -6,13 +17,12 @@ import (
 	"github.com/epinio/epinio/helpers/kubernetes"
 	"github.com/epinio/epinio/pkg/api/core/v1/models"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 )
 
-// EnvironmentNames returns the names of all environment variables which are set on the named application by users.
-// It does not return values.
+// EnvironmentNames returns the names of all environment variables which are set on the named
+// application by users.  It does not return values.
 func EnvironmentNames(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef) ([]string, error) {
 	evSecret, err := envLoad(ctx, cluster, appRef)
 	if err != nil {
@@ -27,22 +37,26 @@ func EnvironmentNames(ctx context.Context, cluster *kubernetes.Cluster, appRef m
 	return result, nil
 }
 
-// Environment returns the environment variables and their values which are set on the named application by users
-func Environment(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef) (models.EnvVariableList, error) {
+// Environment returns the environment variables and their values which are set on the named
+// application by users
+func Environment(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef) (models.EnvVariableMap, error) {
 	evSecret, err := envLoad(ctx, cluster, appRef)
 	if err != nil {
 		return nil, err
 	}
 
-	result := models.EnvVariableList{}
+	return EnvironmentFromSecret(evSecret), nil
+}
+
+// EnvironmentFromSecret is the core of Environment, extracting the set of environment variable
+// assignments from the secret containing them.
+func EnvironmentFromSecret(evSecret *v1.Secret) models.EnvVariableMap {
+	result := models.EnvVariableMap{}
 	for name, value := range evSecret.Data {
-		result = append(result, models.EnvVariable{
-			Name:  name,
-			Value: string(value),
-		})
+		result[name] = string(value)
 	}
 
-	return result, nil
+	return result
 }
 
 // EnvironmentSet adds or modifies the specified environment variable
@@ -50,14 +64,14 @@ func Environment(ctx context.Context, cluster *kubernetes.Cluster, appRef models
 // will have the specified value. If the application is active the
 // workload is restarted to update it to the new settings. The
 // function will __not__ wait on this to complete.
-func EnvironmentSet(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef, assignments models.EnvVariableList, replace bool) error {
+func EnvironmentSet(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef, assignments models.EnvVariableMap, replace bool) error {
 	return envUpdate(ctx, cluster, appRef, func(evSecret *v1.Secret) {
 		// Replacement is adding to a clear structure
 		if replace {
 			evSecret.Data = make(map[string][]byte)
 		}
-		for _, ev := range assignments {
-			evSecret.Data[ev.Name] = []byte(ev.Value)
+		for name, value := range assignments {
+			evSecret.Data[name] = []byte(value)
 		}
 	})
 }
@@ -92,7 +106,7 @@ func envUpdate(ctx context.Context, cluster *kubernetes.Cluster,
 
 		modifyEnvironment(evSecret)
 
-		_, err = cluster.Kubectl.CoreV1().Secrets(appRef.Org).Update(
+		_, err = cluster.Kubectl.CoreV1().Secrets(appRef.Namespace).Update(
 			ctx, evSecret, metav1.UpdateOptions{})
 
 		return err
@@ -103,50 +117,5 @@ func envUpdate(ctx context.Context, cluster *kubernetes.Cluster,
 // application's environment. If necessary it creates that secret.
 func envLoad(ctx context.Context, cluster *kubernetes.Cluster, appRef models.AppRef) (*v1.Secret, error) {
 	secretName := appRef.MakeEnvSecretName()
-
-	evSecret, err := cluster.GetSecret(ctx, appRef.Org, secretName)
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return nil, err
-		}
-
-		// Error is `Not Found`. Create the secret.
-
-		app, err := Get(ctx, cluster, appRef)
-		if err != nil {
-			// Should not happen. Application was validated to exist
-			// already somewhere by callers.
-			return nil, err
-		}
-
-		owner := metav1.OwnerReference{
-			APIVersion: app.GetAPIVersion(),
-			Kind:       app.GetKind(),
-			Name:       app.GetName(),
-			UID:        app.GetUID(),
-		}
-
-		evSecret = &v1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      secretName,
-				Namespace: appRef.Org,
-				OwnerReferences: []metav1.OwnerReference{
-					owner,
-				},
-				Labels: map[string]string{
-					"app.kubernetes.io/name":       appRef.Name,
-					"app.kubernetes.io/part-of":    appRef.Org,
-					"app.kubernetes.io/managed-by": "epinio",
-					"app.kubernetes.io/component":  "application",
-				},
-			},
-		}
-		err = cluster.CreateSecret(ctx, appRef.Org, *evSecret)
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return evSecret, nil
+	return loadOrCreateSecret(ctx, cluster, appRef, secretName, "environment")
 }

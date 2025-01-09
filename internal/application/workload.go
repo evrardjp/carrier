@@ -1,64 +1,81 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package application
 
 import (
 	"context"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/epinio/epinio/helpers/kubernetes"
-	"github.com/epinio/epinio/internal/names"
-	"github.com/epinio/epinio/internal/services"
+	"github.com/epinio/epinio/internal/cli/server/requestctx"
+	"github.com/epinio/epinio/internal/configurations"
 	"github.com/epinio/epinio/pkg/api/core/v1/models"
 
 	pkgerrors "github.com/pkg/errors"
-
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/kubectl/pkg/util/podutils"
+	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
+	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
-type AppServiceBind struct {
-	service  string // name of the service getting bound
-	resource string // name of the kube secret to mount as volume to make the service params available in the app
+type AppConfigurationBind struct {
+	configuration string // name of the configuration getting bound
+	resource      string // name of the kube secret to mount as volume to make the configuration params available in the app
 }
 
-type AppServiceBindList []AppServiceBind
+type AppConfigurationBindList []AppConfigurationBind
 
 // Workload manages applications that are deployed. It provides workload
 // (deployments) specific actions for the application model.
 type Workload struct {
-	app     models.AppRef
-	cluster *kubernetes.Cluster
+	app             models.AppRef
+	cluster         *kubernetes.Cluster
+	name            string
+	desiredReplicas int32
 }
 
 // NewWorkload constructs and returns a workload representation from an application reference.
-func NewWorkload(cluster *kubernetes.Cluster, app models.AppRef) *Workload {
-	return &Workload{cluster: cluster, app: app}
+func NewWorkload(cluster *kubernetes.Cluster, app models.AppRef, desiredReplicas int32) *Workload {
+	return &Workload{cluster: cluster, app: app, desiredReplicas: desiredReplicas}
 }
 
-func ToBinds(ctx context.Context, services services.ServiceList, appName string, userName string) (AppServiceBindList, error) {
-	bindings := AppServiceBindList{}
+func ToBinds(ctx context.Context, configurations configurations.ConfigurationList, appName string, userName string) (AppConfigurationBindList, error) {
+	bindings := AppConfigurationBindList{}
 
-	for _, service := range services {
-		bindResource, err := service.GetBinding(ctx, appName, userName)
+	for _, configuration := range configurations {
+		bindResource, err := configuration.GetSecret(ctx)
 		if err != nil {
-			return AppServiceBindList{}, err
+			return AppConfigurationBindList{}, err
 		}
-		bindings = append(bindings, AppServiceBind{
-			resource: bindResource.Name,
-			service:  service.Name(),
+		bindings = append(bindings, AppConfigurationBind{
+			resource:      bindResource.Name,
+			configuration: configuration.Name,
 		})
 	}
 
 	return bindings, nil
 }
 
-func (b AppServiceBindList) ToVolumesArray() []corev1.Volume {
+func (b AppConfigurationBindList) ToVolumesArray() []corev1.Volume {
 	volumes := []corev1.Volume{}
 
 	for _, binding := range b {
 		volumes = append(volumes, corev1.Volume{
-			Name: binding.service,
+			Name: binding.configuration,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: binding.resource,
@@ -70,262 +87,313 @@ func (b AppServiceBindList) ToVolumesArray() []corev1.Volume {
 	return volumes
 }
 
-func (b AppServiceBindList) ToMountsArray() []corev1.VolumeMount {
+func (b AppConfigurationBindList) ToMountsArray() []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{}
 
 	for _, binding := range b {
 		mounts = append(mounts, corev1.VolumeMount{
-			Name:      binding.service,
+			Name:      binding.configuration,
 			ReadOnly:  true,
-			MountPath: fmt.Sprintf("/services/%s", binding.service),
+			MountPath: fmt.Sprintf("/configurations/%s", binding.configuration),
 		})
 	}
 
 	return mounts
 }
 
-// BoundServicesChange imports the currently bound services into the deployment. It takes a ServiceList, not just
-// names, as it has to create/retrieve the associated service binding secrets. It further takes a set of the old
-// services. This enables incremental modification of the deployment (add, remove affected, instead of wholsesale
-// replacement).
-func (a *Workload) BoundServicesChange(ctx context.Context, userName string, oldServices NameSet, newServices services.ServiceList) error {
-	_, err := Get(ctx, a.cluster, a.app)
+func (b AppConfigurationBindList) ToNames() []string {
+	names := []string{}
+
+	for _, binding := range b {
+		names = append(names, binding.configuration)
+	}
+
+	return names
+}
+
+// AddApplicationPods is a helper for List. It loads all the epinio controlled pods in the
+// namespace into memory, indexes them by namespace and application, and returns the resulting map
+// of pod lists.
+// ATTENTION: Using an empty string for the namespace loads the information from all namespaces.
+func AddApplicationPods(auxiliary map[ConfigurationKey]AppData, ctx context.Context, cluster *kubernetes.Cluster, namespace string) (map[ConfigurationKey]AppData, error) {
+	podList, err := cluster.Kubectl.CoreV1().Pods(namespace).List(
+		ctx, metav1.ListOptions{
+			LabelSelector: labels.Set(map[string]string{
+				"app.kubernetes.io/component": "application",
+			}).String(),
+		})
 	if err != nil {
-		// Should not happen. Application was validated to exist
-		// already somewhere by callers.
-		return err
+		return nil, err
 	}
 
-	bindings, err := ToBinds(ctx, newServices, a.app.Name, userName)
+	for _, pod := range podList.Items {
+		appName := pod.Labels["app.kubernetes.io/name"]
+		appNamespace := pod.Labels["app.kubernetes.io/part-of"]
+		key := EncodeConfigurationKey(appName, appNamespace)
+
+		if _, found := auxiliary[key]; !found {
+			auxiliary[key] = AppData{}
+		}
+
+		data := auxiliary[key]
+
+		data.pods = append(data.pods, pod)
+
+		auxiliary[key] = data
+	}
+
+	return auxiliary, nil
+}
+
+// Pods is a helper, it returns the Pods belonging to the Deployment of the workload.
+func (a *Workload) Pods(ctx context.Context) ([]corev1.Pod, error) {
+	podList, err := a.cluster.Kubectl.CoreV1().Pods(a.app.Namespace).List(
+		ctx, metav1.ListOptions{
+			LabelSelector: labels.Set(map[string]string{
+				"app.kubernetes.io/component": "application",
+				"app.kubernetes.io/name":      a.app.Name,
+				"app.kubernetes.io/part-of":   a.app.Namespace,
+			}).String(),
+		})
 	if err != nil {
-		return err
+		return []corev1.Pod{}, err
 	}
 
-	// Create name-keyed maps from old/new slices for quick lookup and decision. No linear searches.
+	return podList.Items, nil
+}
 
-	new := map[string]struct{}{}
-
-	for _, s := range newServices {
-		new[s.Name()] = struct{}{}
+func (a *Workload) PodNames(ctx context.Context) ([]string, error) {
+	podList, err := a.Pods(ctx)
+	if err != nil {
+		return []string{}, err
 	}
 
-	// Read, modify and write the deployment
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Retrieve the latest version of Deployment before attempting update
-		// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
-		deployment, err := a.Deployment(ctx)
-		if err != nil {
-			return err
-		}
+	result := []string{}
+	for _, p := range podList {
+		result = append(result, p.Name)
+	}
 
-		// The action is done in multiple iterations over the deployment's volumes and volumemounts.
-		// The first iteration over each determines removed services (in old, not in new). The second
-		// iteration, over the new services now, adds all which are not in old, i.e. actually new.
-
-		newVolumes := []corev1.Volume{}
-		newMounts := []corev1.VolumeMount{}
-
-		for _, volume := range deployment.Spec.Template.Spec.Volumes {
-			_, hasold := oldServices[volume.Name]
-			_, hasnew := new[volume.Name]
-
-			// Note that volumes which are not in old are passed and kept. These are the volumes
-			// not related to services.
-
-			if hasold && !hasnew {
-				continue
-			}
-
-			newVolumes = append(newVolumes, volume)
-		}
-
-		// TODO: Iterate over containers and find the one matching the app name
-		for _, mount := range deployment.Spec.Template.Spec.Containers[0].VolumeMounts {
-
-			_, hasold := oldServices[mount.Name]
-			_, hasnew := new[mount.Name]
-
-			// Note that volumes which are in not in old are passed and kept. These are the volumes
-			// not related to services.
-
-			if hasold && !hasnew {
-				continue
-			}
-
-			newMounts = append(newMounts, mount)
-		}
-
-		for _, binding := range bindings {
-			// Skip services which already exist
-			if _, hasold := oldServices[binding.service]; hasold {
-				continue
-			}
-
-			newVolumes = append(newVolumes, corev1.Volume{
-				Name: binding.service,
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: binding.resource,
-					},
-				},
-			})
-
-			newMounts = append(newMounts, corev1.VolumeMount{
-				Name:      binding.service,
-				ReadOnly:  true,
-				MountPath: fmt.Sprintf("/services/%s", binding.service),
-			})
-		}
-
-		// Write the changed set of mounts and volumes back to the deployment ...
-		deployment.Spec.Template.Spec.Volumes = newVolumes
-		deployment.Spec.Template.Spec.Containers[0].VolumeMounts = newMounts
-
-		// ... and then the cluster.
-		_, err = a.cluster.Kubectl.AppsV1().Deployments(a.app.Org).Update(
-			ctx, deployment, metav1.UpdateOptions{})
-
-		return err
-	})
+	return result, nil
 }
 
-// EnvironmentChange imports the current environment into the
-// deployment. This requires only the names of the currently existing
-// environment variables, not the values, as the import is internally
-// done as pod env specifications using secret key references.
-func (a *Workload) EnvironmentChange(ctx context.Context, varNames []string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Retrieve the latest version of Deployment before attempting update
-		// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
-		deployment, err := a.Deployment(ctx)
-		if err != nil {
-			return err
-		}
+// Replicas returns a map of models.PodInfo. Each PodInfo matches a Pod belonging to
+// the application Deployment (workload).
+func (a *Workload) replicas(pods []corev1.Pod, podMetrics []metricsv1beta1.PodMetrics) (map[string]*models.PodInfo, error) {
+	result := a.generatePodInfo(pods)
 
-		evSecretName := a.app.MakeEnvSecretName()
+	if err := a.populatePodMetrics(result, podMetrics); err != nil {
+		return result, err
+	}
 
-		// 1. Remove all the old EVs referencing the app's EV secret.
-		// 2. Add entries for the new set of EV's (S.a varNames).
-		// 3. Replace container spec
-		//
-		// Note: While 1+2 could be optimized to only remove entries of
-		//       EVs not in varNames, and add only entries for varNames
-		//       not in Env, this is way more complex for what is likely
-		//       just 10 entries. I expect any gain in perf to be
-		//       negligible, and completely offset by the complexity of
-		//       understanding and maintaining it later. Full removal
-		//       and re-adding is much simpler to understand, and should
-		//       be fast enough.
-
-		newEnvironment := []corev1.EnvVar{}
-
-		for _, ev := range deployment.Spec.Template.Spec.Containers[0].Env {
-			// Drop EV if pulled from EV secret of the app
-			if ev.ValueFrom != nil &&
-				ev.ValueFrom.SecretKeyRef != nil &&
-				ev.ValueFrom.SecretKeyRef.Name == evSecretName {
-				continue
-			}
-			// Keep everything else.
-			newEnvironment = append(newEnvironment, ev)
-		}
-
-		for _, varName := range varNames {
-			newEnvironment = append(newEnvironment, corev1.EnvVar{
-				Name: varName,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: evSecretName,
-						},
-						Key: varName,
-					},
-				},
-			})
-		}
-
-		deployment.Spec.Template.Spec.Containers[0].Env = newEnvironment
-
-		_, err = a.cluster.Kubectl.AppsV1().Deployments(a.app.Org).Update(
-			ctx, deployment, metav1.UpdateOptions{})
-
-		return err
-	})
-}
-
-// Scale changes the number of instances (replicas) for the
-// application's Deployment.
-func (a *Workload) Scale(ctx context.Context, instances int32) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Retrieve the latest version of Deployment before attempting update
-		// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
-		deployment, err := a.Deployment(ctx)
-		if err != nil {
-			return err
-		}
-
-		deployment.Spec.Replicas = &instances
-
-		_, err = a.cluster.Kubectl.AppsV1().Deployments(a.app.Org).Update(
-			ctx, deployment, metav1.UpdateOptions{})
-
-		return err
-	})
-}
-
-// deployment is a helper, it returns the kube deployment resource of the workload.
-func (a *Workload) Deployment(ctx context.Context) (*appsv1.Deployment, error) {
-	return a.cluster.Kubectl.AppsV1().Deployments(a.app.Org).Get(
-		ctx, a.app.Name, metav1.GetOptions{},
-	)
+	return result, nil
 }
 
 // Get returns the state of the app deployment encoded in the workload.
-func (a *Workload) Get(ctx context.Context, deployment *appsv1.Deployment) *models.AppDeployment {
-	active := false
-	route := ""
-	stageID := ""
-	status := ""
-	username := ""
+func (a *Workload) Get(ctx context.Context) (*models.AppDeployment, error) {
 
-	// Query application deployment for stageID and status (ready vs desired replicas)
+	// Information about the active workload.  The data is pulled out of the list of Pods
+	// associated with the application.  It originally directly asked the app's Deployment
+	// resource. With app charts the existence of such a resource cannot be guarantueed any
+	// longer.
 
-	deploymentSelector := fmt.Sprintf("app.kubernetes.io/part-of=%s,app.kubernetes.io/name=%s", a.app.Org, a.app.Name)
-
-	deploymentListOptions := metav1.ListOptions{
-		LabelSelector: deploymentSelector,
+	podList, err := a.Pods(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	deployments, err := a.cluster.Kubectl.AppsV1().Deployments(a.app.Org).List(ctx, deploymentListOptions)
-
+	routes, err := ListRoutes(ctx, a.cluster, a.app)
 	if err != nil {
-		status = pkgerrors.Wrap(err, "failed to get Deployment status").Error()
-	} else if len(deployments.Items) < 1 {
-		status = "0/0"
-	} else {
-		status = fmt.Sprintf("%d/%d",
-			deployments.Items[0].Status.ReadyReplicas,
-			deployments.Items[0].Status.Replicas)
-
-		stageID = deployments.Items[0].
-			Spec.Template.ObjectMeta.Labels["epinio.suse.org/stage-id"]
-		username = deployments.Items[0].Spec.Template.ObjectMeta.Labels["app.kubernetes.io/created-by"]
-
-		active = true
+		routes = []string{err.Error()}
 	}
 
-	routes, err := a.cluster.ListIngressRoutes(ctx, a.app.Org, names.IngressName(a.app.Name))
+	// -- errors retrieving the pod metrics are ignored.
+	// -- this will be reported later as `not available`.
+	// note: The pod metrics are not nil in that cases, just an empty slice.
+	// that is good, as that allows AFP below to still generate the basic pod info.
+	podMetrics, err := a.getPodMetrics(ctx)
 	if err != nil {
-		route = err.Error()
-	} else {
-		route = routes[0]
+		// While the error is ignored, as the server can operate without metrics, and while
+		// the missing metrics will be noted in the data shown to the user, it is logged so
+		// that the operator can see this as well.
+		requestctx.Logger(ctx).Error(err, "metrics not available")
+	}
+
+	return a.AssembleFromParts(ctx, podList, podMetrics, routes)
+}
+
+// AssembleFromParts is the core of Get constructing the deployment structure from the pods and
+// auxiliary information explicitly given to it.
+func (a *Workload) AssembleFromParts(
+	ctx context.Context,
+	podList []corev1.Pod,
+	podMetrics []metricsv1beta1.PodMetrics,
+	routes []string,
+) (*models.AppDeployment, error) {
+	// No pods => no workload
+	if len(podList) == 0 {
+		return nil, nil
+	}
+
+	var (
+		readyReplicas  int32
+		createdAt      time.Time
+		stageID        string
+		username       string
+		controllerName string
+	)
+
+	if len(podList) > 0 {
+		// Pods found. replace defaults with actual information.
+
+		// Initialize various pieces from the first pod ...
+		createdAt = podList[0].ObjectMeta.CreationTimestamp.Time
+		stageID = podList[0].ObjectMeta.Labels["epinio.io/stage-id"]
+		controllerName = podList[0].ObjectMeta.Labels["epinio.io/app-container"]
+		username = podList[0].ObjectMeta.Annotations[models.EpinioCreatedByAnnotation]
+
+		for _, pod := range podList {
+			// Choose oldest time of all pods.
+			if createdAt.After(pod.ObjectMeta.CreationTimestamp.Time) {
+				createdAt = pod.ObjectMeta.CreationTimestamp.Time
+			}
+
+			// Count ready pods - A temp is used to avoid `Implicit memory aliasing in for loop`.
+			tmp := pod
+			if podutils.IsPodReady(&tmp) {
+				readyReplicas = readyReplicas + 1
+			}
+		}
+	}
+
+	// Order is important. Required before replicas is called.
+	a.name = controllerName
+
+	var status string
+	var replicas map[string]*models.PodInfo
+	var err error
+	if podMetrics != nil {
+		replicas, err = a.replicas(podList, podMetrics)
+		if err != nil {
+			status = pkgerrors.Wrap(err, "failed to get replica details").Error()
+		}
+	}
+
+	if status == "" {
+		status = fmt.Sprintf("%d/%d", readyReplicas, a.desiredReplicas)
 	}
 
 	return &models.AppDeployment{
-		Active:   active,
-		Username: username,
-		StageID:  stageID,
-		Status:   status,
-		Route:    route,
+		Name:            controllerName,
+		Active:          true,
+		CreatedAt:       createdAt.Format(time.RFC3339), // ISO 8601
+		Replicas:        replicas,
+		Username:        username,
+		StageID:         stageID,
+		Status:          status,
+		Routes:          routes,
+		DesiredReplicas: a.desiredReplicas,
+		ReadyReplicas:   readyReplicas,
+	}, nil
+}
+
+// GetPodMetrics is a helper for List. It loads all the pot metrics for epinio controlled pods in
+// the namespace into memory, indexes them by pod name, and returns the resulting map of metrics
+// lists. The user, List, selects the metrics it needs for an application based on the application's
+// pods.
+// ATTENTION: Using an empty string for the namespace loads the information from all namespaces.
+func GetPodMetrics(ctx context.Context, cluster *kubernetes.Cluster, namespace string) (map[string]metricsv1beta1.PodMetrics, error) {
+	result := make(map[string]metricsv1beta1.PodMetrics)
+
+	metricsClient, err := metrics.NewForConfig(cluster.RestConfig)
+	if err != nil {
+		return nil, err
 	}
+
+	podMetrics, err := metricsClient.MetricsV1beta1().PodMetricses(namespace).
+		List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/managed-by=epinio",
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, metric := range podMetrics.Items {
+		result[metric.ObjectMeta.Name] = metric
+	}
+
+	return result, nil
+}
+
+// getPodMetrics loads the pod metrics for the specific application into memory and returns the
+// resulting slice.
+func (a *Workload) getPodMetrics(ctx context.Context) ([]metricsv1beta1.PodMetrics, error) {
+	result := []metricsv1beta1.PodMetrics{}
+
+	selector := fmt.Sprintf(`app.kubernetes.io/name=%s`, a.app.Name)
+
+	metricsClient, err := metrics.NewForConfig(a.cluster.RestConfig)
+	if err != nil {
+		return result, err
+	}
+
+	podMetrics, err := metricsClient.MetricsV1beta1().PodMetricses(a.app.Namespace).
+		List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return result, err
+	}
+
+	return podMetrics.Items, nil
+}
+
+func (a *Workload) generatePodInfo(pods []corev1.Pod) map[string]*models.PodInfo {
+	result := map[string]*models.PodInfo{}
+
+	for i, pod := range pods {
+		restarts := int32(0)
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Name == a.name {
+				restarts += cs.RestartCount
+			}
+		}
+
+		result[pod.Name] = &models.PodInfo{
+			Name:      pod.Name,
+			Restarts:  restarts,
+			Ready:     podutils.IsPodReady(&pods[i]),
+			CreatedAt: pod.ObjectMeta.CreationTimestamp.Time.Format(time.RFC3339), // ISO 8601
+		}
+	}
+
+	return result
+}
+
+func (a *Workload) populatePodMetrics(podInfos map[string]*models.PodInfo, podMetrics []metricsv1beta1.PodMetrics) error {
+	for _, podMetric := range podMetrics {
+		if _, podExists := podInfos[podMetric.Name]; !podExists {
+			continue // should not happen but just making sure metrics match pods
+		}
+
+		cpuUsage := resource.NewQuantity(0, resource.DecimalSI)
+		memUsage := resource.NewQuantity(0, resource.BinarySI)
+
+		podContainers := podMetric.Containers
+		for _, container := range podContainers {
+			cpuUsage.Add(*container.Usage.Cpu())
+			memUsage.Add(*container.Usage.Memory())
+		}
+
+		// cpu * 1000 -> milliCPUs (rounded)
+		milliCPUs := int64(math.Round(cpuUsage.ToDec().AsApproximateFloat64() * 1000))
+
+		mem, ok := memUsage.AsInt64()
+		if !ok {
+			return pkgerrors.Errorf("couldn't get memory usage as an integer, memUsage.AsDec = %T %+v\n", memUsage.AsDec(), memUsage.AsDec())
+		}
+
+		podInfos[podMetric.Name].MetricsOk = true
+		podInfos[podMetric.Name].MemoryBytes = mem
+		podInfos[podMetric.Name].MilliCPUs = milliCPUs
+	}
+
+	return nil
 }

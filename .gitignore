@@ -6,6 +6,7 @@ password
 .bash_history
 *.box
 *.vmdk
+*.tgz
 personal-setup
 .envrc
 /*values.yaml
@@ -16,7 +17,6 @@ personal-setup
 /resources
 acceptance/acceptance.test
 .vscode
-assets/embedded-files/container-registry-0.1.0.tgz
-assets/statik/
-assets/statikWebAssets/
-assets/statikWebViews/
+.ignore
+contrib/
+Session.vim

@@ -1,3 +1,14 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package tailer
 
 import (
@@ -5,7 +16,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/epinio/epinio/helpers/tracelog"
+	"github.com/epinio/epinio/internal/cli/server/requestctx"
 	"github.com/pkg/errors"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,7 +45,7 @@ func Watch(ctx context.Context, i v1.PodInterface, podFilter *regexp.Regexp,
 	containerFilter *regexp.Regexp, containerExcludeFilter *regexp.Regexp,
 	containerState ContainerState, labelSelector labels.Selector) (chan *Target, chan *Target, error) {
 
-	logger := tracelog.NewLogger().WithName("pod-watch").V(4)
+	logger := requestctx.Logger(ctx).WithName("pod-watch").V(4)
 
 	logger.Info("create")
 	watcher, err := i.Watch(ctx, metav1.ListOptions{Watch: true, LabelSelector: labelSelector.String()})
@@ -92,7 +103,7 @@ func Watch(ctx context.Context, i v1.PodInterface, podFilter *regexp.Regexp,
 							continue
 						}
 
-						if containerState.Match(c.State) {
+						if c.State.Running != nil || c.State.Terminated != nil { // There are logs to read
 							logger.Info("report added", "container", c.Name, "pod", pod.Name, "namespace", pod.Namespace)
 							added <- &Target{
 								Namespace: pod.Namespace,
@@ -100,8 +111,6 @@ func Watch(ctx context.Context, i v1.PodInterface, podFilter *regexp.Regexp,
 								Container: c.Name,
 							}
 						}
-
-						logger.Info("state mismatch", "container", c.Name, "pod", pod.Name, "namespace", pod.Namespace, "actual", c.State, "desired", containerState)
 					}
 				case watch.Deleted:
 					logger.Info("pod deleted", "name", pod.Name)

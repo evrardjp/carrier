@@ -1,148 +1,136 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package client
 
 import (
-	"encoding/json"
-
-	"github.com/pkg/errors"
+	"fmt"
+	"net/url"
 
 	api "github.com/epinio/epinio/internal/api/v1"
 	"github.com/epinio/epinio/pkg/api/core/v1/models"
 )
 
-// Services returns a list of services
-func (c *Client) Services(org string) (models.ServiceResponseList, error) {
-	resp := models.ServiceResponseList{}
+func (c *Client) ServiceCatalog() (models.CatalogServices, error) {
+	response := models.CatalogServices{}
+	endpoint := api.Routes.Path("ServiceCatalog")
 
-	data, err := c.get(api.Routes.Path("Services", org))
-	if err != nil {
-		return resp, err
-	}
-
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, err
-	}
-
-	return resp, nil
+	return Get(c, endpoint, response)
 }
 
-// ServiceBindingCreate creates a binding from an app to a serviceclass
-func (c *Client) ServiceBindingCreate(req models.BindRequest, org string, appName string) (models.BindResponse, error) {
-	resp := models.BindResponse{}
+func (c *Client) ServiceCatalogShow(serviceName string) (*models.CatalogService, error) {
+	response := &models.CatalogService{}
+	endpoint := api.Routes.Path("ServiceCatalogShow", serviceName)
 
-	b, err := json.Marshal(req)
-	if err != nil {
-		return resp, nil
-	}
-
-	data, err := c.post(api.Routes.Path("ServiceBindingCreate", org, appName), string(b))
-	if err != nil {
-		return resp, err
-	}
-
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, errors.Wrap(err, "response body is not JSON")
-	}
-
-	return resp, nil
+	return Get(c, endpoint, response)
 }
 
-// ServiceBindingDelete deletes a binding from an app to a serviceclass
-func (c *Client) ServiceBindingDelete(org string, appName string, serviceName string) (models.Response, error) {
-	resp := models.Response{}
+// ServiceCatalogMatch returns all matching namespaces for the prefix
+func (c *Client) ServiceCatalogMatch(prefix string) (models.CatalogMatchResponse, error) {
+	response := models.CatalogMatchResponse{}
+	endpoint := api.Routes.Path("ServiceCatalogMatch", prefix)
 
-	data, err := c.delete(api.Routes.Path("ServiceBindingDelete", org, appName, serviceName))
-	if err != nil {
-		return resp, err
-	}
-
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, err
-	}
-
-	return resp, nil
+	return Get(c, endpoint, response)
 }
 
-// ServiceDelete deletes a service
-func (c *Client) ServiceDelete(req models.ServiceDeleteRequest, org string, name string, f errorFunc) (models.ServiceDeleteResponse, error) {
-	resp := models.ServiceDeleteResponse{}
+func (c *Client) AllServices() (models.ServiceList, error) {
+	response := models.ServiceList{}
+	endpoint := api.Routes.Path("AllServices")
 
-	b, err := json.Marshal(req)
-	if err != nil {
-		return resp, nil
-	}
-
-	data, err := c.doWithCustomErrorHandling(
-		api.Routes.Path("ServiceDelete", org, name),
-		"DELETE", string(b), f)
-	if err != nil {
-		if err.Error() != "Bad Request" {
-			return resp, err
-		}
-		return resp, nil
-	}
-
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &resp); err != nil {
-			return resp, errors.Wrap(err, "response body is not JSON")
-		}
-	}
-
-	return resp, nil
+	return Get(c, endpoint, response)
 }
 
-// ServiceCreate creates a service by invoking the associated API endpoint
-func (c *Client) ServiceCreate(req models.ServiceCreateRequest, org string) (models.Response, error) {
-	resp := models.Response{}
+func (c *Client) ServiceCreate(request models.ServiceCreateRequest, namespace string) (models.Response, error) {
+	response := models.Response{}
+	endpoint := api.Routes.Path("ServiceCreate", namespace)
 
-	c.log.V(5).WithValues("request", req, "org", org).Info("requesting ServiceCreate")
-
-	b, err := json.Marshal(req)
-	if err != nil {
-		return resp, nil
-	}
-
-	data, err := c.post(api.Routes.Path("ServiceCreate", org), string(b))
-	if err != nil {
-		return resp, err
-	}
-
-	c.log.V(5).WithValues("response", req, "org", org).Info("received ServiceCreate")
-
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, errors.Wrap(err, "response body is not JSON")
-	}
-
-	return resp, nil
+	return Post(c, endpoint, request, response)
 }
 
-// ServiceShow shows a service
-func (c *Client) ServiceShow(org string, name string) (models.ServiceShowResponse, error) {
-	var resp models.ServiceShowResponse
+// ServiceUpdate updates a service by invoking the associated API endpoint
+func (c *Client) ServiceUpdate(request models.ServiceUpdateRequest, namespace, name string) (models.Response, error) {
+	response := models.Response{}
+	endpoint := api.Routes.Path("ServiceUpdate", namespace, name)
 
-	data, err := c.get(api.Routes.Path("ServiceShow", org, name))
-	if err != nil {
-		return resp, err
-	}
-
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, err
-	}
-
-	return resp, nil
+	return Patch(c, endpoint, request, response)
 }
 
-// ServiceApps lists all the apps by services
-func (c *Client) ServiceApps(org string) (models.ServiceAppsResponse, error) {
-	resp := models.ServiceAppsResponse{}
+func (c *Client) ServiceShow(namespace, name string) (*models.Service, error) {
+	response := &models.Service{}
+	endpoint := api.Routes.Path("ServiceShow", namespace, name)
 
-	data, err := c.get(api.Routes.Path("ServiceApps", org))
-	if err != nil {
-		return resp, err
+	return Get(c, endpoint, response)
+}
+
+// ServiceMatch returns all matching services for the prefix
+func (c *Client) ServiceMatch(namespace, prefix string) (models.ServiceMatchResponse, error) {
+	response := models.ServiceMatchResponse{}
+	endpoint := api.Routes.Path("ServiceMatch", namespace, prefix)
+
+	return Get(c, endpoint, response)
+}
+
+func (c *Client) ServiceDelete(request models.ServiceDeleteRequest, namespace string, names []string) (models.ServiceDeleteResponse, error) {
+	response := models.ServiceDeleteResponse{}
+
+	queryParams := url.Values{}
+	for _, serviceName := range names {
+		queryParams.Add("services[]", serviceName)
 	}
 
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return resp, errors.Wrap(err, "response body is not JSON")
-	}
+	endpoint := fmt.Sprintf(
+		"%s?%s",
+		api.Routes.Path("ServiceBatchDelete", namespace),
+		queryParams.Encode(),
+	)
 
-	return resp, nil
+	return Delete(c, endpoint, request, response)
+}
+
+func (c *Client) ServiceBind(request models.ServiceBindRequest, namespace, name string) (models.Response, error) {
+	response := models.Response{}
+	endpoint := api.Routes.Path("ServiceBind", namespace, name)
+
+	return Post(c, endpoint, request, response)
+}
+
+func (c *Client) ServiceUnbind(request models.ServiceUnbindRequest, namespace, name string) (models.Response, error) {
+	response := models.Response{}
+	endpoint := api.Routes.Path("ServiceUnbind", namespace, name)
+
+	return Post(c, endpoint, request, response)
+}
+
+func (c *Client) ServiceList(namespace string) (models.ServiceList, error) {
+	response := models.ServiceList{}
+	endpoint := api.Routes.Path("ServiceList", namespace)
+
+	return Get(c, endpoint, response)
+}
+
+// ServiceApps lists a map from services to bound apps, for the namespace
+func (c *Client) ServiceApps(namespace string) (models.ServiceAppsResponse, error) {
+	response := models.ServiceAppsResponse{}
+	endpoint := api.Routes.Path("ServiceApps", namespace)
+
+	return Get(c, endpoint, response)
+}
+
+// ServicePortForward will forward the local traffic to a remote app
+func (c *Client) ServicePortForward(namespace string, serviceName string, opts *PortForwardOpts) error {
+	endpoint := fmt.Sprintf("%s%s/%s", c.Settings.API, api.WsRoot, api.WsRoutes.Path("ServicePortForward", namespace, serviceName))
+
+	if fw, err := NewServicePortForwarder(c, endpoint, opts.Address, opts.Ports, opts.StopChannel); err != nil {
+		return err
+	} else {
+		return fw.ForwardPorts()
+	}
 }

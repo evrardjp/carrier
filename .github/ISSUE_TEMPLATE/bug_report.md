@@ -2,7 +2,8 @@
 name: Bug report
 about: Create a report to help us improve
 title: ''
-labels: 'bug'
+labels:
+  - kind/bug
 assignees: ''
 
 ---
@@ -38,11 +39,10 @@ If you paste long logs, you could also add them into a collapsed block:
   \```
 &lt;details&gt;
 
-You can increase Epinio's logging by exporting these variables:
+You can increase Epinio's logging by exporting this variable:
 
 ```
 export TRACE_LEVEL=255
-export DEBUG=true
 ```
 
 To follow the server logs you can use:
