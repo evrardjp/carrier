@@ -1,4 +1,14 @@
 #!/bin/bash
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -e
 
@@ -46,7 +56,7 @@ else
   MIRROR_NAME="$SHARED_REGISTRY_MIRROR"
 fi
 
-echo "Writing epinio config yaml"
+echo "Writing epinio settings yaml"
 TMP_CONFIG="$(mktemp)"
 trap "rm -f $TMP_CONFIG" EXIT
 
@@ -110,7 +120,7 @@ data:
 EOF
 
 date
-echo "Waiting for the deployments of the foundational services to be ready"
+echo "Waiting for the deployments of the foundational configurations to be ready"
 # 1200s = 20 min, to handle even a horrendously slow setup. Regular is 10 to 30 seconds.
 kubectl wait --for=condition=Available --namespace local-path-storage deployment/local-path-provisioner --timeout=1200s
 date

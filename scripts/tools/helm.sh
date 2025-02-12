@@ -1,14 +1,26 @@
-# shellcheck shell=bash
-# shellcheck disable=SC2034
+#!/bin/bash
+set -e
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-TOOLS+=(helm)
+VERSION="3.9.0"
 
-HELM_VERSION="3.6.3"
+URL="https://get.helm.sh/helm-v${VERSION}-linux-amd64.tar.gz"
+SHA256="1484ffb0c7a608d8069470f48b88d729e88c41a1b6602f145231e8ea7b43b50a"
 
-HELM_URL_DARWIN="https://get.helm.sh/helm-v{version}-darwin-amd64.tar.gz"
-HELM_URL_LINUX="https://get.helm.sh/helm-v{version}-linux-amd64.tar.gz"
-HELM_URL_WINDOWS="https://get.helm.sh/helm-v{version}-windows-amd64.zip"
+pushd "$TMP_DIR" > /dev/null
+wget -q "$URL" -O "helm.tar.gz"
+echo "${SHA256} helm.tar.gz" | sha256sum -c
 
-HELM_SHA256_DARWIN="84a1ff17dd03340652d96e8be5172a921c97825fd278a2113c8233a4e8db5236"
-HELM_SHA256_LINUX="07c100849925623dc1913209cd1a30f0a9b80a5b4d6ff2153c609d11b043e262"
-HELM_SHA256_WINDOWS="797d2abd603a2646f2fb9c3fabba46f2fabae5cbd1eb87c20956ec5b4a2fc634"
+mkdir -p helm
+tar xvf "helm.tar.gz" -C helm
+mv helm/*/helm "${OUTPUT_DIR}/helm"
+popd > /dev/null

@@ -1,16 +1,25 @@
-# shellcheck shell=bash
-# shellcheck disable=SC2034
+#!/bin/bash
+set -e
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-TOOLS+=(k3d)
+VERSION="5.6.0"
 
-K3D_VERSION="4.4.4"
+URL="https://github.com/k3d-io/k3d/releases/download/v${VERSION}/k3d-linux-amd64"
+SHA256="c2ca4b90c0c064cd56ae674d586e2003712fe5841748223552e2f8536f741366"
 
-function k3d_version { k3d version; }
+pushd "$TMP_DIR" > /dev/null
+wget -q "$URL" -O k3d
+echo "${SHA256} k3d" | sha256sum -c
 
-K3D_SHA256_DARWIN="5fc9b68c9cd523ea743a9ca31163330db642d50f4db421ee00f7e1f4a29da552"
-K3D_SHA256_LINUX="6d4ac3d4c5b084f445980e427c5d3a75eefd2c39a22d028825c234c6c20d1e46"
-K3D_SHA256_WINDOWS="1e09e00ee830247ededc3c4718e62f89c1ec7a634fcdf9defb76d124e6a43b83"
-
-K3D_URL_DARWIN="https://github.com/rancher/k3d/releases/download/v{version}/k3d-darwin-amd64"
-K3D_URL_LINUX="https://github.com/rancher/k3d/releases/download/v{version}/k3d-linux-amd64"
-K3D_URL_WINDOWS="https://github.com/rancher/k3d/releases/download/v{version}/k3d-windows-amd64.exe"
+chmod +x k3d
+mv k3d "${OUTPUT_DIR}/k3d"
+popd > /dev/null

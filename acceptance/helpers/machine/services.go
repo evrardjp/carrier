@@ -1,98 +1,84 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package machine
 
 import (
 	"fmt"
 
+	. "github.com/epinio/epinio/acceptance/helpers/matchers"
+	"github.com/epinio/epinio/acceptance/helpers/proc"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/epinio/epinio/helpers"
 )
 
-func (m *Machine) MakeService(serviceName string) {
-	out, err := m.Epinio("", "service", "create", serviceName, "username", "epinio-user")
-	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
+func (m *Machine) HaveServiceInstance(serviceName string) {
+	By(fmt.Sprintf("HSI %s", serviceName))
 
-	// And check presence
-
-	out, err = m.Epinio("", "service", "list")
-	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
-	ExpectWithOffset(1, out).To(MatchRegexp(serviceName))
+	// And check presence and readiness
+	out, err := m.Epinio("", "service", "show", serviceName)
+	Expect(err).ToNot(HaveOccurred(), out)
+	Expect(out).To(ContainSubstring(serviceName))
+	Expect(out).To(HaveATable(
+		WithHeaders("KEY", "VALUE"),
+		WithRow("Status", "deployed"),
+	))
+	By("HSI/ok")
 }
 
-func (m *Machine) BindAppService(appName, serviceName, org string) {
-	out, err := m.Epinio("", "service", "bind", serviceName, appName)
-	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
+func (m *Machine) MakeServiceInstance(serviceName, catalogService string) {
+	GinkgoHelper()
 
-	// And check deep into the kube structures
-	m.VerifyAppServiceBound(appName, serviceName, org, 2)
-}
+	By(fmt.Sprintf("creating service %s -> %s", catalogService, serviceName))
 
-func (m *Machine) VerifyAppServiceBound(appName, serviceName, org string, offset int) {
-	out, err := helpers.Kubectl("get", "deployment",
-		"--namespace", org, appName,
-		"-o", "jsonpath={.spec.template.spec.volumes}")
-	ExpectWithOffset(offset, err).ToNot(HaveOccurred(), out)
-	ExpectWithOffset(offset, out).To(MatchRegexp(serviceName))
+	out, err := m.Epinio("", "service", "create", catalogService, serviceName, "--wait")
+	Expect(err).ToNot(HaveOccurred(), out)
 
-	out, err = helpers.Kubectl("get", "deployment",
-		"--namespace", org, appName,
-		"-o", "jsonpath={.spec.template.spec.containers[0].volumeMounts}")
-	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
-	ExpectWithOffset(1, out).To(MatchRegexp("/services/" + serviceName))
+	// And check presence and readiness
+	out, err = m.Epinio("", "service", "show", serviceName)
+	Expect(err).ToNot(HaveOccurred(), out)
+	Expect(out).To(ContainSubstring(serviceName))
+	Expect(out).To(
+		HaveATable(
+			WithHeaders("KEY", "VALUE"),
+			WithRow("Status", "deployed"),
+		),
+	)
+
+	outNamespace, err := m.Epinio(m.nodeTmpDir, "target")
+	Expect(err).ToNot(HaveOccurred(), out)
+	outPods, err := proc.Kubectl("get", "pods", "-A")
+	Expect(err).ToNot(HaveOccurred(), out)
+	outHelm, err := proc.Run("", false, "helm", "list", "-a", "-A")
+	Expect(err).ToNot(HaveOccurred(), out)
+	By(fmt.Sprintf("%s\nPods:\n%s\nHelm releases:\n%s\n", outNamespace, outPods, outHelm))
+
+	By("CSI/ok")
 }
 
 func (m *Machine) DeleteService(serviceName string) {
-	m.DeleteServiceWithUnbind(serviceName, false)
-}
+	By("deleting service " + serviceName)
 
-func (m *Machine) DeleteServiceUnbind(serviceName string) {
-	m.DeleteServiceWithUnbind(serviceName, true)
-}
-
-func (m *Machine) DeleteServiceWithUnbind(serviceName string, unbind bool) {
-	var err error
-	var out string
-	if unbind {
-		out, err = m.Epinio("", "service", "delete", serviceName, "--unbind")
-	} else {
-		out, err = m.Epinio("", "service", "delete", serviceName)
-	}
+	out, err := m.Epinio("", "service", "delete", serviceName)
 	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
+	Expect(out).To(ContainSubstring("Services Removed"))
 
-	// And check non-presence
 	EventuallyWithOffset(1, func() string {
-		out, err = m.Epinio("", "service", "list")
+		out, err := m.Epinio("", "service", "list")
 		Expect(err).ToNot(HaveOccurred(), out)
 		return out
-	}, "10m").ShouldNot(MatchRegexp(serviceName))
-}
-
-func (m *Machine) CleanupService(serviceName string) {
-	out, err := m.Epinio("", "service", "delete", serviceName)
-
-	if err != nil {
-		fmt.Printf("deleting service failed : %s\n%s", err.Error(), out)
-	}
-}
-
-func (m *Machine) UnbindAppService(appName, serviceName, org string) {
-	out, err := m.Epinio("", "service", "unbind", serviceName, appName)
-	ExpectWithOffset(1, err).ToNot(HaveOccurred(), out)
-
-	// And deep check in kube structures for non-presence
-	m.VerifyAppServiceNotbound(appName, serviceName, org, 2)
-}
-
-func (m *Machine) VerifyAppServiceNotbound(appName, serviceName, org string, offset int) {
-	out, err := helpers.Kubectl("get", "deployment",
-		"--namespace", org, appName,
-		"-o", "jsonpath={.spec.template.spec.volumes}")
-	ExpectWithOffset(offset, err).ToNot(HaveOccurred(), out)
-	ExpectWithOffset(offset, out).ToNot(MatchRegexp(serviceName))
-
-	out, err = helpers.Kubectl("get", "deployment",
-		"--namespace", org, appName,
-		"-o", "jsonpath={.spec.template.spec.containers[0].volumeMounts}")
-	ExpectWithOffset(offset, err).ToNot(HaveOccurred(), out)
-	ExpectWithOffset(offset, out).ToNot(MatchRegexp("/services/" + serviceName))
+	}, "1m").ShouldNot(
+		HaveATable(
+			WithHeaders("NAME", "CREATED", "CATALOG SERVICE", "STATUS", "APPLICATIONS"),
+			WithRow(serviceName, WithDate(), "mysql-dev", "(not-ready|deployed)", ""),
+		),
+	)
 }

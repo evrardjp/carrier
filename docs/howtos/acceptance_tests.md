@@ -2,6 +2,18 @@
 
 ## Basic Run
 
+### Preparation
+
+An accessible Kubernetes instance is required to run the acceptance tests.
+If none is available, K3d can be
+[setup locally](https://docs.epinio.io/installation/install_epinio_on_k3d.html).
+
+The Kubernetes instance needs to be prepared prior to the test run. K3d has
+its own make target for the preparation which can be initiated by running
+`make prepare_environment_k3d`.
+
+### Execution
+
 Invoke `make test-acceptance` to running the epinio acceptance tests
 with its standard configuration.
 
@@ -22,7 +34,7 @@ focus a run on specific tests, as per ginkgo's documentation.
 
    1. `KUBCONFIG`: This will give access the kubernetes cluster.
    
-   2. `EPINIO_CONFIG`: This will provide credentials to be used by tests
+   2. `EPINIO_SETTINGS`: This will provide credentials to be used by tests
       to access the epinio server
    
    3. `EPINIO_BINARY`: This will provide the path of epinio binary to be

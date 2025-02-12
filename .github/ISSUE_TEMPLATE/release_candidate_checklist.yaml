@@ -1,0 +1,84 @@
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Release Candidate Checklist
+description: Checklist for a new Epinio release candidate
+title: 'Release vX.Y.Z-rc'
+labels:
+  - kind/release
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Checklist and steps to follow for an Epinio release candidate.  
+        
+        Edit the title with the proper release version number, open the issue and complete the tasks.  
+
+        If you need more details you can find more information in the [Wiki](https://github.com/epinio/epinio/wiki/Releasing-Epinio).  
+
+        ---
+
+  - type: checkboxes
+    id: epinio-ui-checklist
+    attributes:
+      label: Epinio UI [OPTIONAL]
+      options:
+        - label: >
+            **( 📝 Manual step )** Tag the `epinio/ui` and check the release action.
+            `git tag -a vX.Y.Z-a.b.c -m 'vX.Y.Z-a.b.c'`
+            `git push origin vX.Y.Z-a.b.c`
+            [LINK](https://github.com/epinio/ui/actions/workflows/release.yml)
+        - label: >
+            **( 📝 Manual step )** Check the `epinio/helm-charts` pull requests for the latest updates. Merge the PR.
+            [LINK](https://github.com/epinio/helm-charts/pulls?q=is%3Apr+author%3Aapp%2Fgithub-actions)
+
+  - type: checkboxes
+    id: epinio-checklist
+    attributes:
+      label: Epinio
+      options:
+        - label: >
+            Check the CI status in `epinio/epinio`
+            [![CI](https://github.com/epinio/epinio/workflows/CI/badge.svg?branch=main)](https://github.com/epinio/epinio/actions/workflows/main.yml?query=branch%3Amain)
+        - label: >
+            **( 📝 Manual step )** Tag `epinio` and check the release action.
+            `git tag -a vX.Y.Z-rc -m 'vX.Y.Z-rc'`
+            `git push origin vX.Y.Z-rc`
+            [LINK](https://github.com/epinio/epinio/actions/workflows/release.yml)
+        - label: >
+            Check the release page for the latest assets and changelog.
+            [LINK](https://github.com/epinio/epinio/releases)
+        - label: >
+            Check the `epinio/homebrew-tap` for the latest version.
+            [LINK](https://github.com/epinio/homebrew-tap/blob/main/Formula/epinio.rb)
+          
+  - type: checkboxes
+    id: helm-charts-checklist
+    attributes:
+      label: Helm Charts
+      options:
+        - label: >
+            **( 📝 Manual step )** Check the `epinio/helm-charts` pull requests for the latest updates. 
+            Update the version of the Chart.yaml adding the `-rc` suffix, and set the `artifacthub.io/prerelease` annotation to `"true"`.
+            Merge the PR.
+            [LINK](https://github.com/epinio/helm-charts/pulls?q=is%3Apr+author%3Aapp%2Fgithub-actions)
+        - label: >
+            **( 📝 Manual step )** Run the `epinio/helm-charts` release action to publish the latest chart.
+            [LINK](https://github.com/epinio/helm-charts/actions/workflows/release.yml)
+
+  - type: checkboxes
+    id: release-checklist
+    attributes:
+      label: Release
+      options:
+        - label: >
+            **( 📝 Manual step )** Edit the latest draft release, set it as "pre-release" and publish the release.
+            [LINK](https://github.com/epinio/epinio/releases)

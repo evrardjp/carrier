@@ -1,9 +1,21 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package models
 
-import (
-	"fmt"
+// __ATTENTION__ Functionally identical to CVSettings, CVSettingList
+// Identical structures
 
-	v1 "k8s.io/api/core/v1"
+import (
+	"sort"
 )
 
 // This subsection of models provides structures related to the
@@ -15,11 +27,28 @@ type EnvVariable struct {
 	Value string `json:"value"`
 }
 
-// EnvVariableList is a collection of EVs, it is used for Set Requests, and as List Responses
+// EnvVariableList is a collection of EVs.
 type EnvVariableList []EnvVariable
 
-// EnvVarnameList is a collection of EV names, it is used for Unset Requests, and as Match Responses
+// EnvVariableMap is a collection of EVs as a map. It is used for Set Requests, and as
+// List Responses
+type EnvVariableMap map[string]string
+
+// EnvVarnameList is a collection of EV names, it is used for Unset Requests, and as Match
+// Responses
 type EnvVarnameList []string
+
+func (evm EnvVariableMap) List() EnvVariableList {
+	result := EnvVariableList{}
+	for name, value := range evm {
+		result = append(result, EnvVariable{
+			Name:  name,
+			Value: value,
+		})
+	}
+	sort.Sort(result)
+	return result
+}
 
 // Implement the Sort interface for EV definition slices
 
@@ -39,46 +68,4 @@ func (evl EnvVariableList) Swap(i, j int) {
 // holds, and else false.
 func (evl EnvVariableList) Less(i, j int) bool {
 	return evl[i].Name < evl[j].Name
-}
-
-// ToEnvVarArray converts the collection of environment variables for
-// the referenced application, as a combination of standard variables
-// and the user-specified variables. The result is used to make the
-// application's environment available to the initial deployment
-func (evl EnvVariableList) ToEnvVarArray(appRef AppRef) []v1.EnvVar {
-	deploymentEnvironment := []v1.EnvVar{
-		{
-			Name:  "PORT",
-			Value: "8080",
-		},
-	}
-
-	for _, ev := range evl {
-		deploymentEnvironment = append(deploymentEnvironment, v1.EnvVar{
-			Name: ev.Name,
-			ValueFrom: &v1.EnvVarSource{
-				SecretKeyRef: &v1.SecretKeySelector{
-					Key: ev.Name,
-					LocalObjectReference: v1.LocalObjectReference{
-						Name: appRef.MakeEnvSecretName(),
-					},
-				},
-			},
-		})
-	}
-
-	return deploymentEnvironment
-}
-
-// StagingEnvArray returns the collection of environment variables and
-// their values in a form suitable for injection into the Tekton
-// staging of an application.
-func (evl EnvVariableList) StagingEnvArray() []string {
-	stagingVariables := []string{}
-
-	for _, ev := range evl {
-		stagingVariables = append(stagingVariables, fmt.Sprintf("%s=%s", ev.Name, ev.Value))
-	}
-
-	return stagingVariables
 }

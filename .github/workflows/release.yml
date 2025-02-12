@@ -1,61 +1,125 @@
-name: Release-pipeline
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
 
+permissions:
+  id-token: write   # This is the key for OIDC!
+  contents: write
+  packages: write
+
+env:
+  SETUP_GO_VERSION: '1.22.1'
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # This is the key for OIDC!
+      contents: write
+      packages: write
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
+          submodules: recursive
           fetch-depth: 0
-      - name: Fetch Branch
-        id: branch
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        timeout-minutes: 5
+        with:
+          cache: false
+          go-version: ${{ env.SETUP_GO_VERSION }}
+
+      - name: Login to GitHub Docker Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - uses: anchore/sbom-action/download-syft@v0.14.3
+
+      - uses: sigstore/cosign-installer@v3.7.0
+
+        # if the release was triggered manually we get the latest tag from git
+        # otherwise we will get the info from the 'github.ref_name'
+      - name: Get latest tag
+        id: get_latest_tag
         run: |
-          raw=$(git branch -r --contains ${{ github.ref }} | grep origin/main)
-          branch=${raw##*/}
-          echo "::set-output name=BRANCH_NAME::$branch"
-      - name: Setup Go
-        uses: actions/setup-go@v2
+          if [[ ${{ github.event_name }} == "workflow_dispatch" ]]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0)
+          else
+            LATEST_TAG=${{ github.ref_name }}
+          fi
+          
+          echo event_name: ${{ github.event_name }}
+          echo ref_name: ${{ github.ref_name }}
+          echo LATEST_TAG: $LATEST_TAG
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v4
         with:
-          go-version: '^1.13.7'
-      - name: Build Epinio
-        if: steps.branch.outputs.BRANCH_NAME == 'main'
-        run: |
-          make build-all-small
-      - name: Login to Docker Hub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.CFCIBOT_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.CFCIBOT_DOCKERHUB_PASSWORD }}
-      - name: Build Epinio images
-        if: steps.branch.outputs.BRANCH_NAME == 'main'
-        run: |
-          make build-images
-      - name: Create CHECKSUMS
-        if: steps.branch.outputs.BRANCH_NAME == 'main'
-        run: ( cd dist ; sha256sum -b epinio* > SHA256SUM.txt )
-      - name: Generate Changelog
-        uses: heinrichreimer/github-changelog-generator-action@v2.1.1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          verbose: "true"
-          excludeLabels: "apparently external cause,chore,devops admin,duplicate,invalid,later,overcome by events,spike,wontfix,do not log,question"
-          pullRequests: "false"
-          onlyLastTag: "true"
-          stripGeneratorNotice: "true"
-          issuesWoLabels: "true"
-          stripHeaders: "true"
-      - name: Release Epinio
-        uses: softprops/action-gh-release@v1
-        if: steps.branch.outputs.BRANCH_NAME == 'main'
-        with:
-          files: ./dist/*
-          body_path: ./CHANGELOG.md
-          prerelease: "true"
+          distribution: goreleaser
+          version: 1.20.0
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.get_latest_tag.outputs.LATEST_TAG }}
+      
+      # Goreleaser will cleanup the draft, so we need to populate it again
+      - name: Run Releaser Drafter
+        uses: release-drafter/release-drafter@v5
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify signatures on the generated docker images and manifests
+        id: verify_signatures
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/epinio/epinio" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            ghcr.io/epinio/epinio-server:${{ steps.get_latest_tag.outputs.LATEST_TAG }}
+          
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/epinio/epinio" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            ghcr.io/epinio/epinio-unpacker:${{ steps.get_latest_tag.outputs.LATEST_TAG }}
+
+      # Trigger automatic release of the Epinio Helm chart when we release
+      # Epinio, by posting an event to the helm chart repository. This event
+      # contains epinio's latest tag.
+
+      - name: epinio/helm-charts Repository Dispatch
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.CHART_REPO_ACCESS_TOKEN }}
+          repository: epinio/helm-charts
+          event-type: epinio-release
+          client-payload: '{"ref": "${{ steps.get_latest_tag.outputs.LATEST_TAG }}"}'

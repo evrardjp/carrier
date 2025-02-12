@@ -1,22 +1,23 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package auth
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/gorilla/websocket"
-	"github.com/pkg/errors"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
-
-	"github.com/epinio/epinio/helpers/kubernetes"
-	"github.com/epinio/epinio/internal/names"
 )
 
 // ExtendLocalTrust makes the certs found in specified PEM string
@@ -41,98 +42,19 @@ func ExtendLocalTrust(certs string) {
 	}
 
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = config
-	websocket.DefaultDialer.TLSClientConfig = config
+	websocket.DefaultDialer.TLSClientConfig = config.Clone()
 
 	// See https://github.com/gorilla/websocket/issues/601 for
 	// what this is a work around for.
 	http.DefaultTransport.(*http.Transport).ForceAttemptHTTP2 = false
 }
 
-// CertParam describes the cert-manager certificate CRD. It's passed to
-// CreateCertificate to create the cert-manager certificate CR.
-type CertParam struct {
-	Name      string
-	Namespace string
-	Domain    string
-	Issuer    string
-}
-
-// CreateCertificate creates a certificate resource, for the given
-// cluster issuer
-func CreateCertificate(
-	ctx context.Context,
-	cluster *kubernetes.Cluster,
-	cert CertParam,
-	owner *metav1.OwnerReference,
-) error {
-	obj, err := newCertificate(cert)
-	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("creation of ssl certificate for issuer '%s' failed", cert.Issuer))
-	}
-
-	client, err := cluster.ClientCertificate()
+// ExtendLocalTrustFromFile will load a cert from the specified file and will extend the local trust
+func ExtendLocalTrustFromFile(path string) error {
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-
-	if owner != nil {
-		obj.SetOwnerReferences([]metav1.OwnerReference{*owner})
-	}
-
-	_, err = client.Namespace(cert.Namespace).Create(ctx, obj, metav1.CreateOptions{})
-	// Ignore the error if it's about cert already existing.
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-
+	ExtendLocalTrust(string(content))
 	return nil
-}
-
-// newCertificate creates a proper certificate resource from the
-// specified parameters. The result is suitable for upload to the
-// cluster.
-func newCertificate(cert CertParam) (*unstructured.Unstructured, error) {
-	// Notes:
-	// - spec.CommonName is length-limited.
-	//   At most 64 characters are allowed, as per [RFC 3280](https://www.rfc-editor.org/rfc/rfc3280.txt).
-	//   That makes it a problem for long app name and domain combinations.
-	// - The spec.dnsNames (SAN, Subject Alternate Names) do not have such a limit.
-	// - Luckily CN is deprecated with regard to DNS checking.
-	//   The SANs are preferred and usually checked first.
-	//
-	// As such our solution is to
-	// - Keep the full app + domain in the spec.dnsNames/SAN.
-	// - Truncate the full app + domain in CN to 64 characters,
-	//   replace the tail with an MD5 suffix computed over the
-	//   full string as means of keeping the text unique across
-	//   apps.
-
-	cn := names.TruncateMD5(fmt.Sprintf("%s.%s", cert.Name, cert.Domain), 64)
-	data := fmt.Sprintf(`{
-		"apiVersion": "cert-manager.io/v1alpha2",
-		"kind": "Certificate",
-		"metadata": {
-			"name": "%[1]s"
-		},
-		"spec": {
-			"commonName" : "%[2]s",
-			"secretName" : "%[1]s-tls",
-			"dnsNames": [
-				"%[1]s.%[3]s"
-			],
-			"issuerRef" : {
-				"name" : "%[4]s",
-				"kind" : "ClusterIssuer"
-			}
-		}
-        }`, cert.Name, cn, cert.Domain, cert.Issuer)
-
-	decoderUnstructured := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
-	obj := &unstructured.Unstructured{}
-	_, _, err := decoderUnstructured.Decode([]byte(data), nil, obj)
-	if err != nil {
-		return nil, err
-	}
-
-	return obj, err
 }

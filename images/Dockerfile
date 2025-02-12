@@ -1,28 +1,25 @@
-ARG BASE_IMAGE=splatform/epinio-base
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-################
-FROM ruby:3.0.1 AS tools
-WORKDIR /workdir
-COPY . .
-RUN apt-get update && apt-get install -y python3-venv
-RUN ./scripts/tools-install.sh helm
-RUN cp output/bin/helm /helm
+FROM alpine as certs
+RUN apk --update --no-cache add ca-certificates
 
-################
-FROM golang:1.16.3 AS build
-WORKDIR /go/src/github.com/epinio
+FROM scratch
+COPY --from=certs /etc/ssl/certs /etc/ssl/certs
 
-# for caching
-COPY go.mod ./
-COPY go.sum ./
-RUN go mod download
+# default, if running outside of gorelease with a self-compiled binary
+ARG DIST_BINARY=dist/epinio-linux-amd64
+ARG SWAGGER_FILE=docs/references/api/swagger.json
 
-COPY . .
-COPY --from=tools /helm /usr/bin/helm
+COPY ${DIST_BINARY} /epinio
+COPY ${SWAGGER_FILE} /swagger.json
 
-RUN make build-all-small
-
-################
-FROM $BASE_IMAGE
-COPY --from=build /go/src/github.com/epinio/dist/epinio-linux-amd64 /epinio
 ENTRYPOINT ["/epinio"]

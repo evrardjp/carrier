@@ -1,11 +1,23 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package routes implements registered urls and parameter substitution
 package routes
 
 import (
 	"fmt"
-	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 // Route describes a route for httprouter
@@ -13,14 +25,14 @@ type Route struct {
 	Method  string
 	Path    string
 	Format  string
-	Handler http.HandlerFunc
+	Handler gin.HandlerFunc
 }
 
 var formatRegex = regexp.MustCompile(`:\w+`)
 
-// NewRoute returns a new route, which can be added to NamedRoutes and used with
-// httprouter. Trailing and leading slashes are removed.
-func NewRoute(method string, path string, h http.HandlerFunc) Route {
+// NewRoute returns a new route, which can be added to NamedRoutes and
+// used with gin. Trailing and leading slashes are removed.
+func NewRoute(method string, path string, h gin.HandlerFunc) Route {
 	format := formatRegex.ReplaceAllString(path, "%s")
 	format = strings.Trim(format, "/")
 	return Route{method, path, format, h}
@@ -30,8 +42,7 @@ func NewRoute(method string, path string, h http.HandlerFunc) Route {
 // https://github.com/gorilla/mux#registered-urls
 type NamedRoutes map[string]Route
 
-// Path returns a route's path with params substituted, panics if
-// used inproperly.
+// Path returns a route's path with params substituted, and panics for unknown routes
 func (n NamedRoutes) Path(name string, params ...interface{}) string {
 	r, ok := n[name]
 	if !ok {

@@ -1,3 +1,14 @@
+// Copyright © 2021 - 2023 SUSE LLC
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package testenv
 
 import (
@@ -25,21 +36,28 @@ const (
 	//
 	// (*) A number, i.e. just digits. __No trailing newline__
 	afterEachSleepPath = "/tmp/after_each_sleep"
+
+	// Namespace is the namespace used for the epinio server and staging setup
+	Namespace = "epinio"
 )
 
 type EpinioEnv struct {
 	machine.Machine
-	nodeTmpDir     string
-	EpinioUser     string
-	EpinioPassword string
+	nodeTmpDir       string
+	EpinioUser       string
+	EpinioPassword   string
+	EpinioAdminToken string
+	EpinioUserToken  string
 }
 
-func New(nodeDir string, rootDir, username, password string) EpinioEnv {
+func New(nodeDir string, rootDir, username, password, adminToken, userToken string) EpinioEnv {
 	return EpinioEnv{
-		nodeTmpDir:     nodeDir,
-		EpinioUser:     username,
-		EpinioPassword: password,
-		Machine:        machine.New(nodeDir, username, password, root, EpinioBinaryPath()),
+		nodeTmpDir:       nodeDir,
+		EpinioUser:       username,
+		EpinioPassword:   password,
+		EpinioAdminToken: adminToken,
+		EpinioUserToken:  userToken,
+		Machine:          machine.New(nodeDir, username, password, adminToken, userToken, root, EpinioBinaryPath()),
 	}
 }
 
@@ -60,18 +78,18 @@ func EpinioBinaryPath() string {
 	return p
 }
 
-// EpinioYAML returns the absolute path to the epinio config YAML
+// EpinioYAML returns the absolute path to the epinio settings YAML
 func EpinioYAML() string {
-	if os.Getenv("EPINIO_CONFIG") == "" {
-		return os.ExpandEnv("${HOME}/.config/epinio/config.yaml")
+	if os.Getenv("EPINIO_SETTINGS") == "" {
+		return os.ExpandEnv("${HOME}/.config/epinio/settings.yaml")
 	}
 
-	return os.Getenv("EPINIO_CONFIG")
+	return os.Getenv("EPINIO_SETTINGS")
 }
 
 // BuildEpinio builds the epinio binaries for the server and if platforms are different also for the CLI
 func BuildEpinio() {
-	targets := []string{"embed_files", "build-linux-amd64"}
+	targets := []string{"build-linux-amd64"}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		// we need a different binary to run locally
 		targets = append(targets, fmt.Sprintf("build-%s-%s", runtime.GOOS, runtime.GOARCH))
@@ -124,6 +142,6 @@ func EnsureDefaultWorkspace(epinioBinary string) {
 }
 
 func AppRouteFromOutput(out string) string {
-	routeRegexp := regexp.MustCompile(`Route: (https:\/\/.*\.omg\.howdoi\.website)`)
+	routeRegexp := regexp.MustCompile(`Routes: .*\n.*(https:\/\/.*\.omg\.howdoi\.website)`)
 	return routeRegexp.FindStringSubmatch(out)[1]
 }

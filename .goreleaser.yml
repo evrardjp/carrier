@@ -1,0 +1,352 @@
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+project_name: epinio
+
+archives:
+  - name_template: >-
+      {{- .ProjectName }}-
+      {{- .Os }}-
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end -}}
+    format: binary
+    format_overrides:
+      - goos: windows
+        format: zip
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: epinio
+    main: ./main.go
+    binary: epinio
+    ldflags:
+      - -w -s
+      - -X "github.com/epinio/epinio/internal/version.Version={{ .Tag }}"
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+      - s390x
+    goarm:
+      - "7"
+    targets:
+    - darwin_amd64
+    - darwin_arm64
+    - linux_amd64_v1
+    - linux_arm64
+    - linux_arm_7
+    - linux_s390x
+    - windows_amd64
+
+changelog:
+  ## Delegate Changelog to release-drafter
+  skip: true
+
+env:
+  - CGO_ENABLED=0
+  - DOCKER_CLI_EXPERIMENTAL=enabled
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+dockers:
+  -
+    use: buildx
+    goos: linux
+    goarch: amd64
+    image_templates:
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-amd64"
+
+    # Skips the docker push.
+    #skip_push: "true"
+
+    # Path to the Dockerfile (from the project root).
+    dockerfile: images/unpacker-Dockerfile
+
+    # Template of the docker build flags.
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--platform=linux/amd64"
+
+  -
+    use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-arm64v8"
+
+    # Skips the docker push.
+    #skip_push: "true"
+
+    # Path to the Dockerfile (from the project root).
+    dockerfile: images/unpacker-Dockerfile
+
+    # Template of the docker build flags.
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--platform=linux/arm64/v8"
+
+  -
+    use: buildx
+    goos: linux
+    goarch: s390x
+    image_templates:
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-s390x"
+
+    # Skips the docker push.
+    #skip_push: "true"
+
+    # Path to the Dockerfile (from the project root).
+    dockerfile: images/unpacker-Dockerfile
+
+    # Template of the docker build flags.
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--platform=linux/s390x"
+
+  -
+    use: buildx
+
+    # GOOS of the built binaries/packages that should be used.
+    goos: linux
+
+    # GOARCH of the built binaries/packages that should be used.
+    goarch: amd64
+
+    # IDs to filter the binaries/packages.
+    ids:
+    - epinio
+
+    # Templates of the Docker image names.
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-amd64"
+
+    # Skips the docker push.
+    #skip_push: "true"
+
+    # Path to the Dockerfile (from the project root).
+    dockerfile: images/Dockerfile
+
+    # Template of the docker build flags.
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--build-arg=DIST_BINARY=epinio"
+    - "--platform=linux/amd64"
+
+    # If your Dockerfile copies files other than binaries and packages,
+    # you should list them here as well.
+    # Note that GoReleaser will create the same structure inside a temporary
+    # folder, so if you add `foo/bar.json` here, on your Dockerfile you can
+    # `COPY foo/bar.json /whatever.json`.
+    # Also note that the paths here are relative to the folder in which
+    # GoReleaser is being run (usually the repository root folder).
+    # This field does not support wildcards, you can add an entire folder here
+    # and use wildcards when you `COPY`/`ADD` in your Dockerfile.
+    extra_files: [ "docs/references/api/swagger.json" ]
+
+  -
+    use: buildx
+    goos: linux
+    goarch: arm64
+    ids:
+    - epinio
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-arm64v8"
+    dockerfile: images/Dockerfile
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--build-arg=DIST_BINARY=epinio"
+    - "--platform=linux/arm64/v8"
+
+    extra_files: [ "docs/references/api/swagger.json" ]
+
+  -
+    use: buildx
+    goos: linux
+    goarch: arm
+    goarm: "7"
+    ids:
+    - epinio
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-armv7"
+    dockerfile: images/Dockerfile
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--build-arg=DIST_BINARY=epinio"
+    - "--platform=linux/arm/v7"
+
+    extra_files: [ "docs/references/api/swagger.json" ]
+
+  -
+    use: buildx
+    goos: linux
+    goarch: s390x
+    ids:
+    - epinio
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-s390x"
+    dockerfile: images/Dockerfile
+    build_flag_templates:
+    - "--pull"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source=https://github.com/epinio/epinio"
+    - "--build-arg=DIST_BINARY=epinio"
+    - "--platform=linux/s390x"
+
+    extra_files: [ "docs/references/api/swagger.json" ]
+
+docker_manifests:
+  # https://goreleaser.com/customization/docker_manifest/
+  -
+    name_template: "ghcr.io/epinio/epinio-server:{{ .Tag }}"
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-amd64"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-arm64v8"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-armv7"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-s390x"
+  -
+    name_template: "ghcr.io/epinio/epinio-server:latest"
+    image_templates:
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-amd64"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-arm64v8"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-armv7"
+    - "ghcr.io/epinio/epinio-server:{{ .Tag }}-s390x"
+  -
+    name_template: "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}"
+    image_templates:
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-amd64"
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-arm64v8"
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-s390x"
+  -
+    name_template: "ghcr.io/epinio/epinio-unpacker:latest"
+    image_templates:
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-amd64"
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-arm64v8"
+    - "ghcr.io/epinio/epinio-unpacker:{{ .Tag }}-s390x"
+
+brews:
+  - name: epinio
+    description: "CLI for Epinio, the Application Development Engine for Kubernetes"
+    homepage: "https://epinio.io/"
+    license: "Apache-2.0"
+
+    tap:
+      owner: epinio
+      name: homebrew-tap
+      token: "{{ .Env.COMMITTER_TOKEN }}"
+
+    folder: Formula
+    url_template: "https://github.com/epinio/epinio/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+
+    test: |
+      output = shell_output("#{bin}/epinio version 2>&1")
+      assert_match "Epinio Version: #{version}", output
+      output = shell_output("#{bin}/epinio settings update-ca 2>&1")
+      assert_match "failed to get kube config", output
+      assert_match "no configuration has been provided", output
+
+release:
+  # Do not auto-publish the release
+  draft: true
+  # Replace the existing draft
+  replace_existing_draft: true
+  # Keep the release notes
+  mode: keep-existing
+  # Detect release candidates, mark as pre-release (and hopefully not as `latest`).
+  prerelease: auto
+
+  extra_files:
+    - glob: ./helm-charts/chart/epinio/crds/*
+
+# Based on https://blog.goreleaser.com/goreleaser-and-software-supply-chain-security-e8917b26924b
+##
+
+# creates SBOMs of all archives and the source tarball using syft
+# https://goreleaser.com/customization/sbom
+# Two different sbom configurations need two different IDs
+
+sboms:
+  - id: archive 
+    artifacts: archive
+  - id: source
+    artifacts: source
+  - id: binary
+    artifacts: binary
+
+# signs our docker images
+# https://goreleaser.com/customization/docker_sign
+
+docker_signs:
+  - cmd: cosign
+    artifacts: all
+    output: true
+    args:
+    - 'sign'
+    - '${artifact}@${digest}'
+    - "--yes" # needed on cosign 2.0.0+
+
+# signs the checksum file and other blobs. all files (including the sboms) are included in the
+# checksum, so we don't need to sign each one if we don't want to
+# https://goreleaser.com/customization/sign
+
+signs:
+- cmd: cosign
+  certificate: '${artifact}.pem'
+  args:
+    - sign-blob
+    - '--output-certificate=${certificate}'
+    - '--output-signature=${signature}'
+    - '${artifact}'
+    - "--yes" # needed on cosign 2.0.0+
+  artifacts: checksum
+  output: true

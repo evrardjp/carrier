@@ -1,4 +1,14 @@
 #!/bin/bash
+# Copyright © 2021 - 2023 SUSE LLC
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#     http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -e
 
@@ -7,6 +17,7 @@ NETWORK_NAME=epinio-acceptance
 MIRROR_NAME=epinio-acceptance-registry-mirror
 CLUSTER_NAME=epinio-acceptance
 export KUBECONFIG=$SCRIPT_DIR/../tmp/acceptance-kubeconfig
+K3S_IMAGE=${K3S_IMAGE:-rancher/k3s:v1.29.2-k3s1}
 
 check_deps() {
   if ! command -v k3d &> /dev/null
@@ -46,7 +57,7 @@ else
   MIRROR_NAME="$SHARED_REGISTRY_MIRROR"
 fi
 
-echo "Writing epinio config yaml"
+echo "Writing epinio settings yaml"
 TMP_CONFIG="$(mktemp)"
 trap "rm -f $TMP_CONFIG" EXIT
 
@@ -60,19 +71,20 @@ EOF
 echo "Creating a new one named $CLUSTER_NAME"
 if [ -z ${EXPOSE_ACCEPTANCE_CLUSTER_PORTS+x} ]; then
   # Without exposing ports on the host:
-  k3d cluster create $CLUSTER_NAME --network $NETWORK_NAME --registry-config $TMP_CONFIG --k3s-server-arg '--disable=traefik' $EPINIO_K3D_INSTALL_ARGS
+  k3d cluster create $CLUSTER_NAME --network $NETWORK_NAME --registry-config $TMP_CONFIG --image "$K3S_IMAGE" $EPINIO_K3D_INSTALL_ARGS
 else
   # Exposing ports on the host:
-  k3d cluster create $CLUSTER_NAME --network $NETWORK_NAME --registry-config $TMP_CONFIG -p '80:80@server[0]' -p '443:443@server[0]' --k3s-server-arg '--disable=traefik' $EPINIO_K3D_INSTALL_ARGS
+  k3d cluster create $CLUSTER_NAME --network $NETWORK_NAME --registry-config $TMP_CONFIG -p '80:80@server:0' -p '443:443@server:0' --image "$K3S_IMAGE" $EPINIO_K3D_INSTALL_ARGS
 fi
 k3d kubeconfig get $CLUSTER_NAME > $KUBECONFIG
 
 echo "Waiting for node to be ready"
+kubectl wait --for=condition=Ready nodes --all --timeout=600s
 nodeName=$(kubectl get nodes -o name)
 kubectl wait --for=condition=Ready "$nodeName"
 
 date
-echo "Waiting for the deployments of the foundational services to be ready"
+echo "Waiting for the deployments of the foundational configurations to be ready"
 # 1200s = 20 min, to handle even a horrendously slow setup. Regular is 10 to 30 seconds.
 kubectl wait --for=condition=Available --namespace kube-system deployment/metrics-server		--timeout=1200s
 kubectl wait --for=condition=Available --namespace kube-system deployment/coredns			--timeout=1200s
